@@ -1,0 +1,135 @@
+==============================================================
+           Documentation for ML_QM_library.jl
+==============================================================
+
+This file contains functions and structures for:
+1. Dataset generation for quantum mechanics problems.
+2. Dynamical evolution of states (unitary and dissipative).
+3. Expectation value computation and plotting.
+4. Generation of special matrices (Gell-Mann, Pauli, orthonormal Hermitian bases).
+5. Pulse shape definitions (pi-pulse).
+6. Infidelity computation between states.
+7. Normalization, standardization, and dataset handling for neural networks.
+8. Training, testing, and prediction with NNs.
+9. Creation and sampling of parameter spaces.
+10. Miscellaneous utility functions (recomposition, state conversion, BSpline).
+
+
+----------------------
+   Dictionaries
+---------------------
+When a new QM problem has been defined, a new tag in these dictionaries needs to be created.
+
+- dataset_problems_dictionary: Dictionary which relates the different problems with their inputs/outputs functions for dataset generation
+
+- plot_problem_dictionary: Dictionary which relates the different problems with the dynamics function to call for trajectory plotting
+
+
+----------------------
+ Special Matrices
+----------------------
+- gellmann_operators(N::Int): returns the set of generalized Gell-Mann matrices for an N-dimensional system.
+- pauli_operators(): returns Pauli matrices by calling gellmann_operators(2).
+- rand_hermitian_orthonormal_basis(d, bases): generates a random orthonormal basis of Hermitian matrices using QR decomposition of dimension d over a QuantumOptics basis.
+
+----------------------------------------
+ Quantum Dynamics and Expectation Values
+----------------------------------------
+- expectation_value(operator::QuantumOptics.Operator, states::QuantumOptics.Ket): computes the expectation value of an operator on given states.
+- plot_expectation(tspan::Tuple, operator_str::String, expectation_data::Vector{Float64}): plots expectation values over time.
+- expectation_and_plot(tspan::Tuple, operator::QuantumOptics.Operator, operator_str::String, states::QuantumOptics.Ket): computes and plots expectation values of an operator.
+- expectation_and_plot_comparison(tspan::Tuple, operator1::QuantumOptics.Operator, operator1_str::String, operator2::QuantumOptics.Operator, operator2_str::String, states::QuantumOptics.Ket): compares expectation values of two operators via plots.
+- dynamic_evolution(time::Tuple, ψ0::QuantumOptics.State, dynamics_input::Vector, type_dynamics::Symbol): evolves a quantum state ψ0 over given dynamics type.
+- Quantum_solver_ODE(prob::ODEProblem): solves a differential equation problem using the Tsit5 solver.
+
+--------------------------------
+ Quantum Pulses and Hamiltonians
+--------------------------------
+- π_pulse_shape(t::Float64, t0::Float64, duration::Float64, eps::Float64): defines a sine-squared π-pulse shape.
+
+-----------------------------
+ Infidelities
+-----------------------------
+- qo_infidelity(ρ::QuantumOptics.State, σ::QuantumOptics.State): computes infidelity between two density operators or kets.
+- in_qo_infidelity(states::QuantumOptics.State, target_state::QuantumOptics.State): computes batch infidelities across several quantum states.
+
+----------------------------------------------------------------------
+ Dataset Generation for Neural Networks from Parameter Space Sampling
+----------------------------------------------------------------------
+- dataset_generation_v2(dataset_features::Local_variable1): main function to generate training and test datasets.
+- dataset_creation(input_data::Vector{Float64}, output_data::Vector{Float64}): merges input and output into dataset rows.
+- twoD_parameter_space(p::Function, parameters_range::Vector{Vector{Float64}}, dim_parameters_space::Vector{Vector{Int64}}), 
+threeD_parameter_space(...), 
+sampling_parameter_space(...): defines parameter grids and maps probability function over them.
+
+----------------------------------------------------------
+ Data Normalization, Standardization, and Preprocessing
+----------------------------------------------------------
+- normalize_data(data::Matrix{Float64}, maxs, mins), denormalize_data(data::Matrix{Float64}, maxs, mins): Min-Max normalization utilities.
+- max_min(data::Matrix{Float64}): computes max and min for each dataset dimension.
+- standardize_data(...), 
+mean_variance(...): dataset standardization support.
+- train_test_dataset_normalization(dataset_vector::Vector{Matrix{Float64}}): normalizes entire train/test split.
+
+---------------------------
+ Dataset I/O
+---------------------------
+- saving_dataset(dataset_vector::Vector{Matrix{Float64}}, names_vector::Vector{String}): saves dataset as CSV.
+- importing_dataset(names_vector::Vector{String}): imports CSV-based dataset.
+
+-----------------------------
+ Neural Network Loss Functions
+-----------------------------
+- relative_mse, mape, loss_1: loss functions for training.
+- loss_1: custom loss favoring fractional differences.
+
+-----------------------------
+ Neural Network Training & Testing
+-----------------------------
+- training!(model::Flux.Chain, epochs::Int64, loss_type::Function, train_X::Matrix{Float64}, train_Y::Matrix{Float64}): performs NN training over epochs.
+- testing_model_infidelity(model::Flux.Chain, type_loss_function::Symbol, test_input::Matrix{Float64}, test_output::Matrix{Float64}): tests model accuracy and reports average test loss.
+
+-----------------------------
+ Neural Network Prediction
+-----------------------------
+- prediction_infidelity(dataset_features::Local_variable1, NN_features::Local_variable2): performs end-to-end prediction of pulse parameters and simulates quantum trajectory.
+- train_test_prediction!(dataset_vector::Vector{Matrix{Float64}}, dataset_features::Local_variable1, NN_features::Local_variable2): manages complete training, testing, and prediction pipeline.
+
+-----------------------------
+ Final Execution Pipeline
+-----------------------------
+- execute_problem_NN(dataset_features::Local_variable1, NN_features::Local_variable2): full wrapper to run the problem pipeline (generation, training, testing, prediction).
+
+===========================================================
+
+----------------------------
+    Special variables
+----------------------------
+- Local_variable1: contains the information related to the QM problem for dataset generation. 
+Its fields are
+    problem::Symbol, problem's tag 
+    len_dataset::Vector{Int64}, #len_dataset = [n_samples, n_training]
+    dim_dataset::Vector{Int64}, #dim_dataset = [n_input, n_output]
+    dim_parameters_space::Vector{Int64}, number of points of the parameters space
+    parameters_range::Vector{Vector{Float64}}, extreme values of the parameters space
+    pr::Functions, probability distribution for sampling;
+    dynamics::Symbol, unitary or dissipative dynamics;
+    t0::Float64, initial time;
+    initial_state::Any, initial state;
+    problem_features::Any, Local_variable3, that defines specific features of the QM problem;
+    names_dataset::Vector{Any}, names of the matrices for saving;
+    modality_dataset::Symbol, can be :generating, :generating_and_saving;
+    norm_dataset::Symbol, can be :normalized or :unormalized.
+
+
+
+- Local_variable2: contains all the information related to the ML-NN problem for training, testing and prediction. It is problem dependent, but it has to have at least the following fields:
+    model::Flux.Chain, the NN;
+    N_epochs::Int64, number of epochs of training;
+    η::Float64, learning rate;
+    optimizer::Flux.Optimiser, the optimizer for the training (ADAM);
+    features_prediction::Vector{Any}
+    loss_func::Symbol
+    type_prediction::Symbol, specifying the predicition function to use.
+
+- Local_variable3: contains the information related to the QM problem. No mandatory field, only the ones required for computation.

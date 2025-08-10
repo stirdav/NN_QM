@@ -1,0 +1,93 @@
+=======================================================
+              READ ME FOR  ML_QM FOLDER
+=======================================================
+------------------------------------
+      What is the code about
+------------------------------------
+The main scope of the code is to define a stable and readable Julia framework for quantum simulations and NN-ML methods for quantum mechanical systems, exploiting QuantumOptics.jl and Flux.jl as background.
+
+At the version ML_QM 1.0, the code is able to:
+
+1. define the systems' properties and operators, make operation with them, compute and plot expectation values on states;
+2. evolve the states (quantum trajectory) through a stable dynamic_evolution function, compute and plot time dependent expectation values, according to Schrodinger or dissipative dynamics;
+3. generate a (normalized or not) dataset, comprised of inputs and outputs, taylored for supervised learning techniques;
+4. define, train and test a NN using the Flux environment: after train and test, use the NN to make predictions.
+
+
+------------------------------------
+      What is in the folder
+------------------------------------
+This file is a guide explaining how to design and code your quantum mechanical problem, and then make a prediction with a NN-based method by running the all algorithm.
+The folder appears to contain several Julia source files central to setting up a specific quantum problem, generating a dataset of quantum trajectories and running a 
+machine learning workflow to predict some properties of the system. 
+These include: 
+
+1. ML_QM_library.jl, which maintains a library of basic machine learning and quantum mechanics functions. It needs to be included in any execution file as an external source;
+2. definitions.jl, which defines quantum mechanical bases and structures; It needs to be included in any execution file as an external source;
+
+3. problem_prototype.jl, a template file which provides all the essential functions to define to run the ML techniques; It needs to be included in the desired execution file as an external source;
+4. ML_QM_execution.jl, a template file which defines the flow to run the ML techniques for the desired quantum problem.
+
+4. project.jl and manifest.jl, minimal local environment;
+5. ML_QM_library_Documentation.txt, which contains the documentation related to the main library.
+
+Additionally, users are expected to define specific feature variables (problem_features, dataset_features, prediction_features, and NN_features) that guide data generation, model training, and prediction. 
+The process is executed through the execute_problem_NN(dataset_features, NN_features) function, which performs dataset creation, normalization, training, testing, and inference.
+
+
+-------------------------------
+           Workflow
+-------------------------------
+In this section, the user can find a guide to follow to define the quantum mechanical problem, the variables and the functions in the code, to use the 
+NN techniques that are coded in these files. The steps are listed in alphabetic order:
+
+_______________________________________________________________________________________________
+A. Definition of the QM problem.
+
+The user needs to use problem_prototype.jl as a template for the functions, and definition.jl as a template for the variables. Furthermore, the user can
+have a look at the example HBAR-qubit_problem.jl. 
+The main things to do in problem_prototype.jl are:
+
+1. write the physical constants of the system (frequencies, masses, etc..);
+2. define the QM basis and the systems operators, by calling the structs in definitions.jl;
+3. define the _inputs and _outputs functions, specific of the problem, to generate the dataset;
+4. Update the dictionaries of problems in ML_QM_library.jl;
+
+
+_______________________________________________________________________________________________
+B. Execute the NN method for the QM problem
+
+The method can be executed by following the template ML_QM_execution.jl. Once the QM problem (step A) has been properly defined, the all machinery runs by calling the function execute_problem_NN(...,...).  Here, several variables appear (\eta, N_epoch, n_training, etc...), and some dynamical variables (structs) as well (these are very important to execute the method efficiently), that contain all the variables defined before and 
+feed them to the function running the method. These are:
+
+1. problem_features variable;
+2. dataset_features variable, which will contain 1.;
+3. prediction_features;
+4. NN_features variable, which will contains 3.
+
+
+Provided a proper definitions of the variables 1.-4., the function execute_problem_NN(dataset_features, NN_features) will execute
+
+1. dataset generation, according to the features;
+2. normalized the dataset, if required;
+3. train the model;
+4. test the trained model;
+5. prediction based on the target output.
+
+and it will generate as output:
+
+1. the generated dataset;
+2. the predicted NN outputs;
+3. the predicted state;
+4. the infidelity of the predicted state w.r.t. the target state.
+
+
+
+
+------------------------------------
+       Additional material 
+------------------------------------
+- Refer to ML_QM_library_Documentation.txt to further information and details about that library.
+
+
+
