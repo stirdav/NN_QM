@@ -86,7 +86,6 @@ and it will generate as output:
 
 
 
-
 ------------------------------------
        Additional material 
 ------------------------------------
