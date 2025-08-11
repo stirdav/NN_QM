@@ -11,7 +11,7 @@ At the version ML_QM 1.0, the code is able to:
 1. define the systems' properties and operators, make operation with them, compute and plot expectation values on states;
 2. evolve the states (quantum trajectory) through a stable dynamic_evolution function, compute and plot time dependent expectation values, according to Schrodinger or dissipative dynamics;
 3. generate a (normalized or not) dataset, comprised of inputs and outputs, taylored for supervised learning techniques;
-4. define, train and test a NN using the Flux environment: after train and test, use the NN to make predictions.
+4. define, train and test a NN, using the Flux environment: after train and test, use the NN to make predictions.
 
 
 ------------------------------------
@@ -22,17 +22,20 @@ The folder appears to contain several Julia source files central to setting up a
 machine learning workflow to predict some properties of the system. 
 These include: 
 
+- Main library
 1. ML_QM_library.jl, which maintains a library of basic machine learning and quantum mechanics functions. It needs to be included in any execution file as an external source;
 2. definitions.jl, which defines quantum mechanical bases and structures; It needs to be included in any execution file as an external source;
 
+- Template files for execution
 3. problem_prototype.jl, a template file which provides all the essential functions to define to run the ML techniques; It needs to be included in the desired execution file as an external source;
 4. ML_QM_execution.jl, a template file which defines the flow to run the ML techniques for the desired quantum problem.
 
+- Documentation and Julia environment
 4. project.jl and manifest.jl, minimal local environment;
 5. ML_QM_library_Documentation.txt, which contains the documentation related to the main library.
 
 Additionally, users are expected to define specific feature variables (problem_features, dataset_features, prediction_features, and NN_features) that guide data generation, model training, and prediction. 
-The process is executed through the execute_problem_NN(dataset_features, NN_features) function, which performs dataset creation, normalization, training, testing, and inference.
+The process is executed through the execute_problem_NN(dataset_features, NN_features) function, which performs dataset creation, normalization, training, testing, and inference all together.
 
 
 -------------------------------
@@ -57,8 +60,8 @@ The main things to do in problem_prototype.jl are:
 _______________________________________________________________________________________________
 B. Execute the NN method for the QM problem
 
-The method can be executed by following the template ML_QM_execution.jl. Once the QM problem (step A) has been properly defined, the all machinery runs by calling the function execute_problem_NN(...,...).  Here, several variables appear (\eta, N_epoch, n_training, etc...), and some dynamical variables (structs) as well (these are very important to execute the method efficiently), that contain all the variables defined before and 
-feed them to the function running the method. These are:
+The method can be executed by following the template ML_QM_execution.jl. Once the QM problem (step A) has been properly defined, the all machinery runs by calling the function execute_problem_NN(...,...).  Here, several variables appear (\eta, N_epoch, n_training, etc...), and some dynamical variables (structs) as well (these are very important to execute the method efficiently), 
+that contain all the variables defined before and feed them to the function running the method. These are (read ML_QM_library_Documentation.txt for further details):
 
 1. problem_features variable;
 2. dataset_features variable, which will contain 1.;
