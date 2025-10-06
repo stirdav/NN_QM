@@ -10,10 +10,7 @@ const hbar = 1.054571817e−34;     # Reduced Planck constant (J·s)
 const kb = 1.380649e-23           # Boltzmann constant (J/K)
 
 ####################################################################################################################
-
-
-
-            #= STRUCTs =# 
+                    #= STRUCTs =# 
 ####################################################################################################################
 #####################################
 #= QM SYSTEMS WITHIN QUANTUMOPTICS =#
@@ -146,10 +143,11 @@ struct fl_1step_features
     correction::Symbol
 end
 
-struct fl_1step_nn_features
+struct fl_1step_nn_features_
     model::Any
     N_epochs::Int64
     η::Float64
+    optimizer::Any
     target_input_1step::Any
     features_prediction::Vector{Any}
     loss_func::Symbol

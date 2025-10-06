@@ -12,7 +12,7 @@ plot_problem_dictionary = Dict(
         :FL_1step_2drives => FLstep_2drives_dynamics
     )
 
-#Ciao
+
 ######################################################################################################
 ######################
 #= SPECIAL MATRICES =#
@@ -63,34 +63,31 @@ function pauli_operators()
 end
 
 function rand_hermitian_orthonormal_basis(d, bases)
-    n = d^2  # Dimension of the space of Hermitian matrices
-    mats = Matrix{ComplexF64}[]  # Array to hold the random Hermitian matrices
+    n = d^2  
+    mats = Matrix{ComplexF64}[]  
 
-    # Step 1: Generate n random Hermitian matrices
+    
     for i in 1:n
-        A = randn(ComplexF64, d, d)           # Random complex matrix
-        H = (A + A') / 2                      # Make it Hermitian (A' is conjugate transpose in Julia)
+        A = randn(ComplexF64, d, d)           
+        H = (A + A') / 2                    
         push!(mats, H)
     end
 
-    # Step 2: Flatten matrices into real vectors by separating real and imaginary parts
-    # This converts each Hermitian matrix into a 2*d^2-dimensional real vector
     vecs = zeros(Float64, 2*d*d, n)
     for (i, H) in enumerate(mats)
-        vecs[1:d*d, i] = vec(H) |> real      # Real parts flattened
-        vecs[d*d+1:end, i] = vec(H) |> imag  # Imaginary parts flattened
+        vecs[1:d*d, i] = vec(H) |> real      
+        vecs[d*d+1:end, i] = vec(H) |> imag  
     end
 
-    # Step 3: Orthonormalize the vectors using QR decomposition
     Q, R = qr(vecs)
 
-    # Step 4: Map the orthonormal vectors back to Hermitian matrices
     basis = Matrix{ComplexF64}[]
     half = d*d
     for i in 1:n
         real_part = reshape(Q[1:half, i], d, d)
         imag_part = reshape(Q[half+1:end, i], d, d)
         H = real_part + im*imag_part
+        
         # Force Hermiticity to correct numerical errors
         H = (H + H') / 2
         push!(basis, H)
@@ -256,7 +253,7 @@ function dataset_creation(input_data, output_data) #ok
 end
 
 #= This function needs to be recalled to generate the training/testing dataset for the NN =#
-function dataset_generation_v2(dataset_features) #ok
+function dataset_generation(dataset_features) #ok
     n_samples, n_training = dataset_features.len_dataset
 
     input_func, output_func = dataset_problems_dictionary[dataset_features.problem]
@@ -610,6 +607,43 @@ function importing_dataset(names_vector)
 end
 
 
+function save_matrices_basis(vec_matrices)
+    # Flatten and convert complex numbers to strings (reads through the rows)
+    flattened_data = [join(vec(string.(mat)), ",") for mat in vec_matrices]
+
+    # Save each flattened matrix as a row in a text-based CSV
+    open("matrices.csv", "w") do io
+        for row in flattened_data
+            println(io, row)
+        end
+    end
+end
+
+
+
+function load_csv_to_matrix_vector(file::String, rows::Int, cols::Int)
+    lines = readlines(file)
+    return [reshape(parse.(ComplexF64, split(line, ",")), rows, cols) for line in lines]
+end
+
+function save_vector_to_csv(vec::AbstractVector, filename::String)
+    open(filename, "w") do io
+        for element in vec
+            println(io, element)
+        end
+    end
+end
+
+function load_vector_from_csv(filename::String)
+    vec = Float64[]  # or change type as needed
+    open(filename, "r") do io
+        for line in eachline(io)
+            push!(vec, parse(Float64, line))
+        end
+    end
+    return vec
+end
+
 
 #################################
 #= Differentiable Loss function=#
@@ -635,7 +669,7 @@ end
 ##############
 #= Training =#
 ##############
-function training!(model, epochs::Int, type_loss_function::Symbol, train_X, train_Y)
+function training!(model, opt, epochs::Int, type_loss_function::Symbol, train_X, train_Y)
     N = size(train_X)[1]
     losses = []
 
@@ -771,7 +805,7 @@ function train_test_prediction!(dataset_vector, dataset_features, NN_features)
 
     #NN training
     println("Progress of the training")
-    losses = training!(NN_features.model, NN_features.N_epochs, NN_features.loss_func, train_input, train_output)
+    losses = training!(NN_features.model, NN_features.optimizer, NN_features.N_epochs, NN_features.loss_func, train_input, train_output)
 
     #Plotting the loss funciton
     epochs = 1:NN_features.N_epochs
@@ -820,12 +854,12 @@ function execute_problem_NN(dataset_features, NN_features)
     #dataset generation, saving or importing
     if dataset_features.modality_dataset == :generating
         println("Dataset generation")
-        train_input, train_output, test_input, test_output = dataset_generation_v2(Dataset_features)
+        train_input, train_output, test_input, test_output = dataset_generation(dataset_features)
         dataset_vector = [train_input, train_output, test_input, test_output]
 
     elseif dataset_features.modality_dataset == :generating_and_saving
         println("Dataset generation")
-        train_input, train_output, test_input, test_output = dataset_generation_v2(Dataset_features)
+        train_input, train_output, test_input, test_output = dataset_generation(dataset_features)
         dataset_vector = [train_input, train_output, test_input, test_output]
         saving_dataset(dataset_vector, dataset_features.names_dataset)
 
