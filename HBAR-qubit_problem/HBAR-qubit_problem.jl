@@ -1,25 +1,29 @@
 #####################################################################################
 #= Physical parameters and variables of a HBAR coupled to a qubit (from Chu et al.)=#
 #####################################################################################
+
 #Mechanical resonator
 ωm = 5.9614e6 #[KHz];
+
 
 #Qubit
 ωq = 5.9456e6 #[KHz];
 
+
+
 #Mechanical bath
-γm = 0.025; #dissipation rate
-Teq   = kb / (2 * pi * hbar) * 1e-3 * 10e-3;
+γm   = 2.5/ Δ0; #dissipation rate
+Teq  = kb / (2 * pi * hbar) * 1e-3 * 10e-3;
 nthm = 1 / (exp(ωm / Teq) - 1); #mechanical bath population
 
 #Qubit bath
-κ = 19; #dissipation rate
-κϕ = 0.25; #dephasing rate
+κ = 19/ Δ0; #dissipation rate
+κϕ = 0.25/ Δ0; #dephasing rate
 
 #= Qubit-resonator detuning and JC coupling =#
 n = 0; #average number of phonons at first step
-Δ0 = ωq - ωm; #System detuning
-#g = 258 ; #JC coupling rate
+#Δ0 = ωq - ωm; #System detuning
+g = 258/ Δ0 ; #JC coupling rate
 
 
 #Coupled System -> operators and basis definitions using QuantumOptics.jl
@@ -107,7 +111,7 @@ function FLstep_dynamics(t0, initial_state, pulse_parameters, typeofdynamics, pr
         elseif modeofdynamics == :all_dynamics
             return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end])
         else
-            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, τ_SWAP
+            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, Δ0, τ_SWAP
         end
 
     else #outputs are kets
@@ -130,7 +134,7 @@ function FLstep_dynamics(t0, initial_state, pulse_parameters, typeofdynamics, pr
         elseif modeofdynamics == :all_dynamics
             return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end])
         else
-            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, τ_SWAP
+            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, Δ0, τ_SWAP
         end
 
     end
@@ -361,7 +365,7 @@ end
 function FLstep_dynamics_3p(t0, initial_state, pulse_parameters, typeofdynamics, problem_features, modeofdynamics) #mode_vector -> [typeofcorrection, n_phonon, :dynamics]
     τ_exc, Ω_R, ωd, τ_SWAP = pulse_parameters
 
-    dt = 1e-6; #dt of time integration
+    dt = 1e-6 * Δ0 ; #dt of time integration (scaled)
 
     typeofcorrection, n_phonon = problem_features.correction, problem_features.phonon_n
 
@@ -390,7 +394,7 @@ function FLstep_dynamics_3p(t0, initial_state, pulse_parameters, typeofdynamics,
         elseif modeofdynamics == :all_dynamics
             return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end])
         else
-            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, τ_SWAP
+            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, ωd, τ_SWAP
         end
 
     else #outputs are kets
@@ -413,7 +417,7 @@ function FLstep_dynamics_3p(t0, initial_state, pulse_parameters, typeofdynamics,
         elseif modeofdynamics == :all_dynamics
             return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end])
         else
-            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, τ_SWAP
+            return vcat(tspan_1, tspan_2[2:end]), vcat(ρ_out1, ρ_out2[2:end]), τ_exc, ωd, τ_SWAP
         end
 
     end
@@ -422,31 +426,21 @@ end
 
 #= [Hamiltonian, Lindblad operator and its hermitian conjugate]  =#
 function create_FLstep_dynamics_3p(t0, pulse_parameters, typeofcorrection, n_phonon)
-    τ_exc, Ω_R, ωd, τ_SWAP = pulse_parameters
-
-    #=
-    if typeofcorrection == :correction_on
-        χ = g^2 / Δ0
-
-        Δ0_tilde = Δ0 + (2*χ*(n_phonon + 0.5))
-    else
-        Δ0_tilde = Δ0
-    end
-    =#
+    τ_exc, Ω_R, ωd, τ_SWAP = pulse_parameters #scaled quantities
 
     #Time indipendent Hamiltonian
     H_JC = g * (qubit_mech.pI*qubit_mech.Ia + qubit_mech.mI*qubit_mech.Iad)
-    H0 = 0.5 * Δ0 * qubit_mech.zI + H_JC
+    H0_prime = 0.5 * qubit_mech.zI + H_JC
 
     #Function defining the Rabi oscillation and detuning
     Ω(t) = Ω_R * π_pulse_shape(t, t0, τ_exc) * cos(ωd * t)
-    Δ(t) = - Δ0 * π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
+    Δ_prime(t) = -1 * π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
 
-    Ht = LazySum([Ω(t0), Δ(t0)/2], [qubit_mech.xI, qubit_mech.zI])
+    Ht = LazySum([Ω(t0), Δ_prime(t0)/2], [qubit_mech.xI, qubit_mech.zI])
     function Hamiltonian(t, ψ)
         Ht.factors[1] = Ω(t)
-        Ht.factors[2] = Δ(t)/2
-        return H0 + Ht
+        Ht.factors[2] = Δ_prime(t)/2
+        return H0_prime + Ht
     end
     
     return [

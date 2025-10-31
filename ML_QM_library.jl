@@ -8,7 +8,7 @@ dataset_problems_dictionary = Dict(
 #= Dictionary which relates the different problems with the dynamics function to call for trajectory plotting =#
 plot_problem_dictionary = Dict(
         :FL_1step => FLstep_dynamics,
-        :FL_1step_3p => FLstep_dynamics,
+        :FL_1step_3p => FLstep_dynamics_3p,
         :FL_1step_2drives => FLstep_2drives_dynamics
     )
 
@@ -151,7 +151,6 @@ end
 #= Run the dynamical evolution of states, depending if it is unitary or dissipative =#
 function dynamic_evolution(time, ψ0, dynamics_input, type_dynamics::Symbol)
     tspan = time[1]:time[2]:time[end]
-    dt = time[2]
 
     # Define a mapping from symbol to function
     dynamics_map = Dict(
@@ -164,18 +163,7 @@ function dynamic_evolution(time, ψ0, dynamics_input, type_dynamics::Symbol)
     # Get the appropriate function
     evolve_func = dynamics_map[type_dynamics]
 
-    return evolve_func(tspan, ψ0, dynamics_input;
-    adaptive=false, 
-    dt=dt,
-    reltol=1e-9,
-    abstol=1e-9
-    )
-end
-
-function Quantum_solver_ODE(prob)
-    sol = solve(prob, Tsit5())
-
-    return sol.t, sol.u
+    return evolve_func(tspan, ψ0, dynamics_input)
 end
 
 ########################################################################################################
@@ -364,9 +352,11 @@ function trajectory_plot(dataset_features, problem_features, parameters) #ok
         params = parameters[k,:]
         if dataset_features.problem == :FL_1step
             params = [params[1], π / params[1], params[2]]
+        elseif dataset_features.problem == :FL_1step_3p
+            params = [params[1], π / params[1], params[2], params[3]]
         end
         
-        tspan, ρ_out, τ_exc, τ_SWAP = dynamic_func(dataset_features.t0, dataset_features.initial_state, params, dataset_features.dynamics, problem_features, :plot) #[typeofcorrection, n_phonon, :plot]) 
+        tspan, ρ_out, τ_exc, ωd, τ_SWAP = dynamic_func(dataset_features.t0, dataset_features.initial_state, params, dataset_features.dynamics, problem_features, :plot) #[typeofcorrection, n_phonon, :plot]) 
 
         push!(trajectories, ρ_out[end])
 
@@ -398,7 +388,7 @@ function trajectory_plot(dataset_features, problem_features, parameters) #ok
 
         plt = PlotlyJS.plot([exp_σz, exp_n], layout)
         PlotlyJS.display(plt)
-        println("τ_exc = ", τ_exc, ", τ_SWAP = ", τ_SWAP)
+        println("τ_exc = ", τ_exc, ", ωd = ", ωd, ", τ_SWAP = ", τ_SWAP)
         push!(plots, plt)
 
         if size(parameters)[1] == 1
