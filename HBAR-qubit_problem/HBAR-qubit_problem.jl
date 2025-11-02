@@ -334,9 +334,9 @@ function FL_1step_3p_NN_outputs(p, parameters_range, dim_parameters_space, n_sam
 end
 =#
 
-
+#Uniform probability distribution 
 function FL_1step_3p_NN_outputs(p, parameters_range, dim_parameters_space, n_samples)
-    samples = Tuple{Float64,Float64}[]
+    samples = Tuple{Float64,Float64,Float64}[]
 
     x_min, x_max = parameters_range[1]
     y_min, y_max = parameters_range[2]
@@ -348,9 +348,7 @@ function FL_1step_3p_NN_outputs(p, parameters_range, dim_parameters_space, n_sam
         y = rand() * (y_max - y_min) + y_min
         z = rand() * (z_max - z_min) + z_min
         
-        if rand() < p(x, y, z)
-            push!(samples, (x, y,z))
-        end
+        push!(samples, (x, y,z))
     end
 
     return samples
