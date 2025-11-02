@@ -282,7 +282,7 @@ end
 function threeD_parameter_space(p, parameters_range, dim_parameters_space)
     para1 = LinRange(parameters_range[1][1], parameters_range[1][2], dim_parameters_space[1])
     para2 = LinRange(parameters_range[2][1], parameters_range[2][2], dim_parameters_space[2])
-    para3 = logrange(parameters_range[3][1], parameters_range[3][2], dim_parameters_space[3])
+    para3 = LinRange(parameters_range[3][1], parameters_range[3][2], dim_parameters_space[3])
 
     parameters_space = vec([(x, y, z) for x in para1, y in para2, z in para3])
     prob = vec([p(x,y,z) for (x,y,z) in parameters_space])
@@ -293,7 +293,7 @@ end
 function sampling_parameter_space(p, parameters_range, dim_parameters_space)
     para1 = LinRange(parameters_range[1][1], parameters_range[1][2], dim_parameters_space[1])
     para2 = LinRange(parameters_range[2][1], parameters_range[2][2], dim_parameters_space[2])
-    para3 = logrange(parameters_range[3][1], parameters_range[3][2], dim_parameters_space[3])
+    para3 = LinRange(parameters_range[3][1], parameters_range[3][2], dim_parameters_space[3])
 
     parameters_space = vec([(x, y, z) for x in para1, y in para2, z in para3])
     prob = vec([p(x,y,z) for (x,y,z) in parameters_space])

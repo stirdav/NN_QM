@@ -326,10 +326,34 @@ end
 ##########################################################################################
 #= FUNCTIONS TO GENERATE THE DATASET FOR THE FL_1step PROBLEM WITH 3 DEGREES OF FREEDOM=#
 ##########################################################################################
+#=
 function FL_1step_3p_NN_outputs(p, parameters_range, dim_parameters_space, n_samples)  #Ok
     parameters_space, prob = threeD_parameter_space(p, parameters_range, dim_parameters_space)
 
     return sample(parameters_space, Weights(prob), n_samples)
+end
+=#
+
+
+function FL_1step_3p_NN_outputs(p, parameters_range, dim_parameters_space, n_samples)
+    samples = Tuple{Float64,Float64}[]
+
+    x_min, x_max = parameters_range[1]
+    y_min, y_max = parameters_range[2]
+    z_min, z_max = parameters_range[3]
+
+    while length(samples) < n_samples
+
+        x = rand() * (x_max - x_min) + x_min
+        y = rand() * (y_max - y_min) + y_min
+        z = rand() * (z_max - z_min) + z_min
+        
+        if rand() < p(x, y, z)
+            push!(samples, (x, y,z))
+        end
+    end
+
+    return samples
 end
 
 function FL_1step_3p_NN_inputs(t0, initial_state, dataset_features, pulse_parameters, n_samples, typeofdynamics) #Typeofdynamics contains [:corrected]
