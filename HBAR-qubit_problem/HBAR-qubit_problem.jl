@@ -7,19 +7,20 @@
 #Qubit
 ωq = 5.9456e6 #[KHz];
 
+
 #Mechanical bath
-γm = 0.025; #dissipation rate
+γm = 2.5; #dissipation rate
 Teq   = kb / (2 * pi * hbar) * 1e-3 * 10e-3;
 nthm = 1 / (exp(ωm / Teq) - 1); #mechanical bath population
 
 #Qubit bath
 κ = 19; #dissipation rate
-κϕ = 0.25; #dephasing rate
+κϕ = 21; #dephasing rate
 
 #= Qubit-resonator detuning and JC coupling =#
 n = 0; #average number of phonons at first step
 Δ0 = ωq - ωm; #System detuning
-#g = 258 ; #JC coupling rate
+g = 258 ; #JC coupling rate
 
 
 #Coupled System -> operators and basis definitions using QuantumOptics.jl
@@ -78,7 +79,7 @@ end
 function FLstep_dynamics(t0, initial_state, pulse_parameters, typeofdynamics, problem_features, modeofdynamics) #mode_vector -> [typeofcorrection, n_phonon, :dynamics]
     τ_exc, Ω_R, τ_SWAP = pulse_parameters
 
-    dt = 1e-6; #dt of time integration
+    dt = 1e-2; #dt of time integration
 
     typeofcorrection, n_phonon = problem_features.correction, problem_features.phonon_n
 
@@ -151,11 +152,11 @@ function create_FLstep_dynamics(t0, pulse_parameters, typeofcorrection, n_phonon
 
     #Time indipendent Hamiltonian
     H_JC = g * (qubit_mech.pI*qubit_mech.Ia + qubit_mech.mI*qubit_mech.Iad)
-    H0 = 0.5 * Δ0_tilde * qubit_mech.zI + H_JC
+    H0 = 0.5 * Δ0 * qubit_mech.zI + H_JC
 
     #Function defining the Rabi oscillation and detuning
     Ω(t) = Ω_R * π_pulse_shape(t, t0, τ_exc) * cos(Δ0_tilde * t)
-    Δ(t) = - Δ0_tilde * π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
+    Δ(t) = - Δ0* π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
 
     Ht = LazySum([Ω(t0), Δ(t0)/2], [qubit_mech.xI, qubit_mech.zI])
     function Hamiltonian(t, ψ)
