@@ -4,7 +4,9 @@ Architecture reference for the `ML_QM` framework and the `HBAR-qubit_problem` ex
 
 ## 1. Purpose
 
-`ML_QM` is a Julia framework combining `QuantumOptics.jl` (quantum dynamics) and `Flux.jl` (neural networks) to solve a specific class of problem: *find the control-pulse parameters that drive a quantum system from a known initial state to a target state, using a neural network trained on simulated trajectories.*
+`ML_QM_library.jl` (plus the shared structs in `definitions.jl`) **is the framework**: a Julia engine combining `QuantumOptics.jl` (quantum dynamics) and `Flux.jl` (neural networks) to solve a specific class of problem: *find the control-pulse parameters that drive a quantum system from a known initial state to a target state, using a neural network trained on simulated trajectories.*
+
+Everything in `ML_QM_library.jl` — dataset generation and the NN train/test/predict tooling alike — is **generic and problem-agnostic**: it has no built-in knowledge of any specific quantum system. A concrete physical problem plugs into it by implementing four functions and registering them in two dictionaries (§4). `HBAR-qubit_problem/` (§6) is currently the **only such problem implemented in this repo**; it is a worked example / consumer of the framework, not part of the framework itself. A different quantum problem (e.g. a different physical system, or a different pulse protocol) would plug into the same `ML_QM_library.jl` machinery the same way, with zero changes to library code.
 
 ### 1.1 Two decoupled halves
 
@@ -29,12 +31,12 @@ old_version/                        (this folder)
   CLAUDE.md / DESIGN.md              This document and its companion — scoped to old_version/ only
   definitions.jl                    QM structs (ho, qubit, qub_ho) + pipeline-config structs
   problem_prototype.jl               Commented-out template for defining a new problem
-  ML_QM_library.jl                   Generic engine: dynamics, datasets, NN train/test/predict, dictionaries
+  ML_QM_library.jl                   *** THE FRAMEWORK *** — generic engine: dynamics, datasets, NN train/test/predict, dictionaries. No problem-specific physics lives here.
   ML_QM_execution.jl                 Template driver script (mostly placeholders) showing run order
   READ ME - ML_QM.txt                User-facing workflow guide
   ML_QM_library_Documentation.txt    Function-by-function API reference
 
-  HBAR-qubit_problem/
+  HBAR-qubit_problem/                 One example plugged into the framework above (currently the only one in the repo)
     HBAR-qubit_problem.jl            Concrete problem: HBAR-qubit "FL_1step" pulse protocol
     Chu_DFL_execution.ipynb          Notebook that runs the pipeline for this problem
     Project.toml / Manifest.toml     Julia environment (only one in the repo)

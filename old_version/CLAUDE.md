@@ -10,14 +10,16 @@ All paths below are relative to this file's own location, i.e. to `old_version/`
 
 ## What this is
 
-`ML_QM` is a Julia framework (built on `QuantumOptics.jl` + `Flux.jl`) made of two decoupled halves, connected only through the dataset each pulse-parameter sample produces:
+**`ML_QM_library.jl` (with shared structs in `definitions.jl`) *is* the framework.** It is a generic, problem-agnostic engine — built on `QuantumOptics.jl` + `Flux.jl` — for (a) generating a dataset of simulated quantum trajectories from sampled pulse parameters, and (b) training/testing/using a neural network on that dataset to invert the pulse→state map. It has no built-in knowledge of qubits, resonators, or any specific physics; a new quantum problem plugs into it by implementing four functions and registering them in two dictionaries (see Architecture below).
+
+It is made of two decoupled halves, connected only through the dataset each pulse-parameter sample produces:
 
 1. **Dynamics engine** — pure physics, no ML. Given a quantum system, an initial state, and a set of pulse parameters, it builds the time-dependent Hamiltonian (and, for dissipative runs, Lindblad jump operators) and integrates the trajectory forward (unitary/Schrödinger or dissipative/Lindblad, via `dynamic_evolution` in `ML_QM_library.jl`). It answers: *given these pulses, what state do I reach?*
 2. **Learning engine** — treats (1) as a black-box data generator. It samples many pulse-parameter tuples, runs each through the dynamics engine, and turns the resulting trajectories into supervised-learning rows (input = state features/expectation values + infidelities, output = the pulse parameters that produced them). It then trains/tests a neural network on that dataset, and uses the trained network to *invert* the map — i.e. answers: *given the state I want, what pulses get me there?* — predicting pulse parameters for a real target state, re-running them through the same dynamics engine, and scoring the result by state infidelity.
 
-So the dynamics engine is the simulator that generates data; the learning engine is everything that consumes that data to train, test, and predict. `execute_problem_NN` (see §5 of `DESIGN.md`) is the orchestrator that chains them.
+So the dynamics engine is the simulator that generates data; the learning engine is everything that consumes that data to train, test, and predict. `execute_problem_NN` (see §5 of `DESIGN.md`) is the orchestrator that chains them. All of this — both halves, plus the orchestrator — is generic and lives in `ML_QM_library.jl`.
 
-`HBAR-qubit_problem/` is the one concrete physical system currently implemented on top of this framework: a mechanical resonator (HBAR) dispersively/JC-coupled to a superconducting qubit (parameters from Chu et al.), with a two-stage pulse protocol (spin-flip, then SWAP).
+`HBAR-qubit_problem/` is the **one concrete physical system currently plugged into this generic framework** — it is an example/consumer of `ML_QM_library.jl`, not part of the framework itself, and it is currently the only problem implemented in this repo. It models a mechanical resonator (HBAR) dispersively/JC-coupled to a superconducting qubit (parameters from Chu et al.), with a two-stage pulse protocol (spin-flip, then SWAP). A different quantum problem would plug into the exact same `ML_QM_library.jl` machinery the same way, without changing any library code.
 
 ## Commands
 
