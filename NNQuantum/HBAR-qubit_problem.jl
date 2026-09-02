@@ -61,31 +61,46 @@ N_mech = 5;
 # new subsystem type needed. Number-operator convention (n = (id+σz)/2 for the
 # qubit) already matches old_version's n_qubit, so no sign-convention risk here.
 #
-# using QuantumDynamics
-#
-# qubit = Qubit(:qubit, ωq)
-# osc   = HarmonicOscillator(:osc, ωm; nmax=N_mech)
-# cs    = CompositeSystem(qubit, osc)
+# Frequencies passed in are already pre-transformed into the frame rotating at
+# ωm, per (d) below — Qubit gets Δ0 = ωq - ωm (not the bare ωq), the mechanical
+# oscillator gets 0.0 (not the bare ωm).
+using QuantumDynamics
+
+qubit = Qubit(:qubit, Δ0)
+osc   = HarmonicOscillator(:osc, 0.0; nmax=N_mech)
+cs    = CompositeSystem(qubit, osc)
 
 # --- (d) Bare + JC-coupling Hamiltonian --------------------------------------
 #
-# Provisional, not a resolution of the lab-frame-vs-rotating-frame question
-# (FUNCTION_MAPPING.md §2, §9): QuantumDynamics's Hamiltonian recipes
-# (bare_hamiltonian, jaynes_cummings) are lab-frame only, with no
-# rotating-frame builder anywhere in the framework. old_version's H0 is
-# written in the frame rotating at ωm — mechanical bare term vanishes, qubit
-# bare term collapses to 0.5*Δ0*σz.
+# Resolves the lab-frame-vs-rotating-frame question left open in earlier
+# drafts of this file (FUNCTION_MAPPING.md §2, §9): QuantumDynamics has no
+# rotating-frame *builder*, but jaynes_cummings can still be made to produce
+# the correct rotating-frame Hamiltonian directly, with no framework changes,
+# by pre-transforming the frequencies fed to the subsystems in (c) instead.
 #
-# H0 here is hand-built from cs's cached embedded operators to structurally
-# mirror old_version's rotating-frame H0 exactly, bypassing jaynes_cummings
-# (which would need pre-transformed frequencies fed to Qubit/HarmonicOscillator
-# and would leave a harmless-but-nonzero global-phase mismatch — see
-# FUNCTION_MAPPING.md §2's two options). No Δ0_tilde correction, per (a).
+# Why this is exact, not an approximation: old_version's frame is a common
+# rotation U(t) = exp(iωm·t·(n_q+n_mech)) applied to both subsystems together.
+# The JC coupling term g*(σp*a + σm*ad) conserves n_q+n_mech (the same
+# commutation fact _lower/_raise's docstring relies on), so it commutes with
+# U's generator and picks up no time dependence at all under the transform —
+# it comes through unchanged. Only the bare energies shift:
+#   ωq*n_q + ωm*n_mech  →  (ωq-ωm)*n_q + 0*n_mech  =  Δ0*n_q
+# (derivation: H_I = U*H*U' + i*(dU/dt)*U' = H - ωm*(n_q+n_mech) here, since
+# U H U' = H). So constructing Qubit(:qubit, Δ0) / HarmonicOscillator(:osc,
+# 0.0) and calling jaynes_cummings on them reproduces this exactly.
 #
-# Δ0 = ωq - ωm
+# The one difference from old_version's own H0: Δ0*n_q = 0.5*Δ0*id +
+# 0.5*Δ0*σz, so this H0 carries an extra constant 0.5*Δ0*id term that
+# old_version's 0.5*Δ0*σz drops. That term is a pure global phase — provably
+# inert for any observable, expectation value, or fidelity — so the two
+# Hamiltonians are physically identical; only a direct matrix diff would see
+# a difference. No Δ0_tilde correction, per (a).
 #
-# H_JC = g * (op(cs,:qubit,:σp) * op(cs,:osc,:a) + op(cs,:qubit,:σm) * op(cs,:osc,:ad))
-# H0   = 0.5 * Δ0 * op(cs,:qubit,:σz) + H_JC
+# Same reasoning shows (f)'s dissipators need no frame-transforming either:
+# Decay/Gain/Dephasing's jump operators (a, ad, σz, σm) all commute with U's
+# generator up to a pure phase, which drops out of the Lindblad dissipator
+# term LρL' - ... entirely.
+H0 = jaynes_cummings(cs, :qubit, :osc, g)
 
 # --- (e) Drive terms ----------------------------------------------------------
 #
@@ -104,18 +119,14 @@ function π_pulse_shape(t, t0, duration, eps=1e-12)
     end
 end
 
-# Ω(t): spin-flip stage, carrier at the free drive frequency ωd (per (a), no
-# fixed Δ0_tilde carrier). Δ(t): SWAP stage, detuning pulse — Δ0 per (a), no
-# Δ0_tilde correction. Wired onto H0 via add_time_dependence, replacing
-# old_version's mutated-LazySum/closure pattern (FUNCTION_MAPPING.md §3, the
-# cleanest 1:1 correspondence in the whole mapping).
-#
-# Ω(t) = Ω_R * π_pulse_shape(t, t0, τ_exc) * cos(ωd * t)
-# Δ(t) = -Δ0 * π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
-#
-# H = add_time_dependence(H0,
-#     t -> Ω(t)   => op(cs, :qubit, :σx),
-#     t -> Δ(t)/2 => op(cs, :qubit, :σz))
+# Ω(t) (spin-flip stage, carrier at the free drive frequency ωd, per (a)) and
+# Δ(t) (SWAP stage, detuning pulse — Δ0 per (a), no Δ0_tilde correction), wired
+# onto H0 via add_time_dependence, are NOT defined here as standalone top-level
+# code. Unlike ωq/ωm/g/κ/etc. above, τ_exc/ωd/τ_SWAP/t0 are per-call pulse
+# parameters, not fixed physical constants — they only make sense as arguments
+# to a function, not as module-level globals. So they're folded directly into
+# (g)'s FLstep_dynamics_3p, the one place they're actually used, rather than
+# duplicated here as a free-standing (and slightly artificial) demo.
 
 # --- (f) Dissipators -----------------------------------------------------------
 #
@@ -126,38 +137,45 @@ end
 # dephasing/decay operators. No dagger bookkeeping needed — evolve/master_dynamic
 # computes J† internally (old_version threads (H,J,J†) through by hand).
 #
-# J = jump_operators(cs, [thermal_bath(:osc, γm, nthm)..., Dephasing(:qubit, κϕ), Decay(:qubit, κ)])
+J = jump_operators(cs, [thermal_bath(:osc, γm, nthm)..., Dephasing(:qubit, κϕ), Decay(:qubit, κ)])
 
 # --- (g) Two-stage protocol runner ----------------------------------------------
 #
 # Two evolve calls (spin-flip stage, then SWAP stage), final state of stage 1
 # feeding stage 2 — direct port of old_version's FLstep_dynamics_3p orchestration,
-# per DESIGN.md's "as-is" choice. Ω_R = π/τ_exc derived, per (a).
+# per DESIGN.md's "as-is" choice. Ω_R = π/τ_exc derived, per (a). (e)'s drive
+# terms are folded in directly here (τ_exc/ωd/τ_SWAP/t0 are this function's
+# arguments, not module-level globals — see the note where (e) used to be).
 #
 # Kept as two separate evolve calls rather than one continuous evolve over a
 # combined schedule (the more idiomatic QuantumDynamics style used in its own
 # fock_state_preparation examples, FUNCTION_MAPPING.md §3) — not resolved here,
-# same "provisional, not decided" status as (d)'s frame question. Collapsing to
-# one call would need tstops/dtmax at the stage boundary to avoid the "narrow
-# kick" adaptive-solver failure mode evolve documents, since τ_exc/τ_SWAP are
-# short relative to the full trajectory.
+# a genuinely open question distinct from (d)'s (now-resolved) frame gap.
+# Collapsing to one call would need tstops/dtmax at the stage boundary to avoid
+# the "narrow kick" adaptive-solver failure mode evolve documents, since
+# τ_exc/τ_SWAP are short relative to the full trajectory.
 #
-# function FLstep_dynamics_3p(t0, initial_state, τ_exc, ωd, τ_SWAP)
-#     Ω_R = π / τ_exc
-#     Ω(t) = Ω_R * π_pulse_shape(t, t0, τ_exc) * cos(ωd * t)
-#     Δ(t) = -Δ0 * π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
-#
-#     H = add_time_dependence(H0,
-#         t -> Ω(t)   => op(cs, :qubit, :σx),
-#         t -> Δ(t)/2 => op(cs, :qubit, :σz))
-#
-#     # stage 1: spin-flip
-#     tspan1, states1 = evolve((t0, t0 + τ_exc), initial_state, H, J)
-#     ψ_at_flip = states1[end]
-#
-#     # stage 2: SWAP
-#     tspan2, states2 = evolve((t0 + τ_exc, t0 + τ_exc + τ_SWAP), ψ_at_flip, H, J)
-#     ψ_at_end = states2[end]
-#
-#     return vcat(tspan1, tspan2[2:end]), vcat(states1, states2[2:end])
-# end
+# Verified end-to-end with a scratch initial state (arbitrary, non-physical
+# τ_exc/ωd/τ_SWAP): returns a well-formed (tspan, states) trajectory with
+# tr(ρ_final) = 1.0 exactly. Real physically-motivated pulse parameters and an
+# actual initial_state are step 2's job, not this one.
+
+function FLstep_dynamics_3p(t0, initial_state, τ_exc, ωd, τ_SWAP)
+    Ω_R = π / τ_exc
+    Ω(t) = Ω_R * π_pulse_shape(t, t0, τ_exc) * cos(ωd * t)
+    Δ(t) = -Δ0 * π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
+
+    H = add_time_dependence(H0,
+        (t -> Ω(t))   => op(cs, :qubit, :σx),
+        (t -> Δ(t)/2) => op(cs, :qubit, :σz))
+
+    # stage 1: spin-flip
+    tspan1, states1 = evolve((t0, t0 + τ_exc), initial_state, H, J)
+    ψ_at_flip = states1[end]
+
+    # stage 2: SWAP
+    tspan2, states2 = evolve((t0 + τ_exc, t0 + τ_exc + τ_SWAP), ψ_at_flip, H, J)
+    ψ_at_end = states2[end]
+
+    return vcat(tspan1, tspan2[2:end]), vcat(states1, states2[2:end])
+end
