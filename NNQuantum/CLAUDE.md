@@ -4,9 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Scope
 
-This file describes only this folder, `NNQuantum/`, a sibling of `old_version/` and `QuantumDynamics/` at the repo root. `NNQuantum/` currently contains **no code** — only this analysis. It is meant to become a new framework that replaces `old_version`'s dynamics engine with `QuantumDynamics`, but that design work has not started yet; this file and `DESIGN.md` are the groundwork for it.
+This file describes only this folder, `NNQuantum/`, a sibling of `old_version/` and `QuantumDynamics/` at the repo root. `NNQuantum/` currently contains **no code** — only this analysis and the plan below. It is meant to become a new framework that replaces `old_version`'s dynamics engine with `QuantumDynamics`. Implementation has not started yet; this file and `DESIGN.md` are the groundwork for it.
 
-The two parts below analyze `old_version/` and `QuantumDynamics/framework/` **strictly separately** — as two independent, unrelated frameworks, each on its own terms. Nothing here proposes a mapping, translation, or design decision that connects them; that comes later, once both are understood on their own.
+The two parts below (Part 1, Part 2) analyze `old_version/` and `QuantumDynamics/framework/` **strictly separately** — as two independent, unrelated frameworks, each on its own terms. They propose no mapping, translation, or design decision that connects them. That connection is the subject of the Plan section immediately below, agreed on after both parts were understood on their own.
+
+---
+
+## Plan
+
+Coarse-grained, three-step plan for turning the two independent analyses above into `NNQuantum`'s actual content. Step 1 is broken into sub-points (a–g); Step 1's sub-points are elaborated further in `DESIGN.md`. Steps 2 and 3 are intentionally left coarse — they get their own refinement pass once the step before them is done.
+
+1. **Rewrite the HBAR-qubit problem on top of `QuantumDynamics`** — define the quantum system (subsystems, composite, Hamiltonian, dissipators) and the two-stage pulse protocol, scoped down to a single variant. See sub-points (a)–(g) below and their detail in `DESIGN.md`.
+   - a) Port only the `:FL_1step_3p` variant (free drive frequency `ωd`, 3 params). `:FL_1step` and `:FL_1step_2drives` are out of scope. `:FL_1step_3p`'s detuning-correction term (`χ=g²/Δ0`) is dead code in `old_version` (present but commented out, never exercised) — dropped, not ported.
+   - b) `N_mech` and `g` are left unbound for now; concrete values (e.g. from Chu et al.) are picked later, right before step 2 needs them to actually run.
+   - c) Build the subsystems and composite system (`Qubit`, `HarmonicOscillator`, `CompositeSystem`) for the qubit + mechanical resonator.
+   - d) Build the bare + JC-coupling Hamiltonian. Provisional: structurally mirrors `old_version`'s rotating-frame `H0`, built from `QuantumDynamics`'s cached operators instead of the `qub_ho` struct. The lab-frame-vs-rotating-frame design question (`QuantumDynamics`'s Hamiltonian recipes are lab-frame only) is explicitly deferred, not resolved here.
+   - e) Build the two drive terms (`Ω(t)`, `Δ(t)`), reusing `old_version`'s `π_pulse_shape` unchanged, wired in via `add_time_dependence`.
+   - f) Build the dissipators: `thermal_bath` for the mechanical mode (replaces `old_version`'s separate decay+gain jump operators with one call), `Dephasing` and `Decay` for the qubit.
+   - g) Port the two-stage protocol runner (spin-flip stage → SWAP stage, final state of stage 1 feeding stage 2), equivalent to `old_version`'s `FLstep_dynamics_3p`.
+2. **Validate the rewritten dynamics.** No numerical ground truth exists to check against — `old_version`'s HBAR problem was never run with concrete `N_mech`/`g`. Validation is qualitative: plot `⟨n_qubit⟩` and `⟨n_mech⟩` over the full trajectory and check the expected physical shape (population swap between qubit and mechanical mode across the two stages, dissipation pulling both toward their bath equilibria). Not yet refined further.
+3. **Translate `old_version`'s ML engine to work with the rewritten dynamics, kept as general as possible** (not hardcoded to the HBAR-qubit problem). What replaces `old_version`'s `Dict{Symbol,Function}` extension mechanism is an open question. Not yet refined further — deferred until step 2 passes.
 
 ---
 
