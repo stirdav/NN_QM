@@ -17,9 +17,10 @@ using QuantumDynamics
 using QuantumOptics
 
 include("Definition.jl")
-include("HBAR-qubit_problem.jl")
+include("FockLadder_problem.jl")   # (renamed from HBAR-qubit_problem.jl)
 
-# (c)-(g) in HBAR-qubit_problem.jl are still commented-out pseudocode (see that
-# file) — nothing beyond the includes above is runnable yet. Once they're made
-# live, this is where step 2's validation run (build cs/H0/J, call
-# FLstep_dynamics_3p, plot ⟨n_qubit⟩/⟨n_mech⟩) will go.
+# FockLadder_problem.jl's (a)-(g) are the *setup* of the HBAR+qubit system
+# (parameters, subsystems, Hamiltonian, dissipators, protocol runner) — all
+# live code, exercised by this include. Step 2's actual validation run
+# (physically-tuned pulse parameters, plot ⟨n_qubit⟩/⟨n_mech⟩) lives in
+# test.jl, not here — see CLAUDE.md's Scope note on test.jl's role.

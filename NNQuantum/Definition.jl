@@ -7,7 +7,7 @@
 # definitions.jl carried over here. The QM-side struct builders (ho, qubit,
 # qub_ho / Harmonic_oscillator, Qubit, Qubit_HO) are NOT ported — QuantumDynamics's
 # own Qubit/HarmonicOscillator/CompositeSystem replace that role (see (c) in
-# HBAR-qubit_problem.jl).
+# FockLadder_problem.jl, renamed from HBAR-qubit_problem.jl).
 #
 # Note: old_version/definitions.jl:10 writes hbar's exponent with a Unicode
 # minus (U+2212, "−") instead of ASCII "-" — not a valid Julia numeric literal
