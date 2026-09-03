@@ -88,6 +88,37 @@ Coarse-grained, three-step plan for turning the two independent analyses above i
 
 ---
 
+## Plan — Resonant single-stage B-spline drive (new goal, open)
+
+A new protocol variant for the same qubit+HBAR system, introduced by the user via a short document ("New task," rewritten in full and updated with this discussion in `DESIGN.md` Part 14 — that's the copy-pasteable LaTeX version). It is **additional to, not a replacement for**, `:FL_1step_3p` — both live in `FockLadder_problem.jl` once this is built. Nothing below is implemented yet; this section records the agreed design so implementation has something concrete to start from, the same way `DESIGN.md` Part 6 preceded that step's actual code.
+
+**Physical setup.** Fully resonant regime, `ωm = ωq = ωd`, so `Δ0 = ωq-ωm = 0` exactly — a genuinely different frame from `:FL_1step_3p`'s (`Δ0≠0`), so this variant needs its **own** `Qubit(:qubit,0.0)`/`HarmonicOscillator(:osc,0.0)`/`CompositeSystem`, built alongside (not replacing) `:FL_1step_3p`'s. With both bare frequencies zero, the Hamiltonian is a static JC coupling plus a purely time-dependent drive, no bare energy term at all: `H(t) = g(σ+b+σ−b†) + ΩRe(t)σx − ΩIm(t)σy`, where the complex envelope `Ω(t)=ΩRe(t)+iΩIm(t)` — checked algebraically, `Ωσ+ + Ω*σ− = ΩReσx − ΩImσy` for `σ±=(σx±iσy)/2`, confirming no drive carrier term is needed (the resonant frame already absorbs it). Dissipators are assumed unchanged (same `thermal_bath`/`Dephasing`/`Decay`, rebuilt on the new composite system) — not yet explicitly confirmed by the user.
+
+**Protocol shape.** A single continuous `evolve` call over `[t0, t0+T]` — replacing `:FL_1step_3p`'s two-stage (spin-flip, then SWAP) hand-off entirely. The free-form complex drive does both jobs in one window.
+
+**Duration `T`.** Sampled per dataset row from a to-be-chosen space (mirroring how `:FL_1step_3p` samples `τ_exc`/`τ_SWAP`), and used both to (a) define the B-spline's time support for that row's forward simulation, and (b) sit directly in the NN's *input* feature vector — a deliberate role reversal from `:FL_1step_3p`, where pulse durations were part of the NN's *output*.
+
+**NN input.** `decom_basis` expectation values on the final state (same random-Hermitian-operator-basis trick `:FL_1step_3p` already uses) ⊕ one infidelity (final state vs. target) ⊕ `T`. Same total width as `:FL_1step_3p`'s `d²+2` — one infidelity slot swapped for a duration slot.
+
+**NN output.** The B-spline coefficient vectors for `ΩRe`/`ΩIm`, concatenated. Exact dimension depends on the still-open basis-size question below.
+
+**Target state.** `spindown(qubit) ⊗ fockstate(osc, step)` directly — no intermediate spin-flip target, since there's no separate stage.
+
+**Infidelity.** Computed once, at the final time, for now. User flagged this could later be extended to interval checkpoints (e.g. quarter-fractions of `T`) for richer supervision — explicitly deferred, not part of this plan yet.
+
+**Left open, deliberately — B-splines, to be checked and updated later:**
+- Package: port `old_version`'s `BSplineKit`-based machinery (`generate_Bspline_basis`/`Bspline_composition`/`drive_from_normalized_spline`), or hand-roll a small basis to avoid the new dependency (same minimal-deps tradeoff raised for `Flux` in `DESIGN.md` Part 6).
+- Spline order/degree.
+- Number of coefficients (basis size) — the free hyperparameter that fixes the NN's output width.
+- Knot placement — uniform, or clamped at the window boundaries for a smooth turn-on/off (the role `π_pulse_shape` played for `:FL_1step_3p`'s drives).
+- Whether `ΩRe`/`ΩIm` share one knot vector/coefficient count or can differ.
+
+**Also open:** whether `decom_basis` is shared between this variant and `:FL_1step_3p` (same `N_mech` ⇒ same composite dimension `d`, so dimensionally compatible) or gets its own; whether the four dissipators really do carry over unchanged to the resonant composite system; naming for the new variant's functions/symbol (`FL_1step_3p_*`'s counterpart).
+
+See `DESIGN.md` Part 14 for the full discussion this was distilled from, and the copy-pasteable LaTeX writeup.
+
+---
+
 ## Part 1 — `old_version/` (`ML_QM`)
 
 A Julia framework (`QuantumOptics.jl` + `Flux.jl`) that inverts a quantum control problem: given a target quantum state, find the pulse parameters that drive a system to it. Two decoupled halves connected only by the dataset:

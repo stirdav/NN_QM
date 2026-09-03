@@ -453,3 +453,173 @@ Part 12 left one question open: whether to promote the `test.jl`-local, now-vali
 4. Both runs' own generated artifacts were cleaned up from `NNQuantum/` afterward (scratch/tempdir output for the `run_Fock_ladder` call; `test_plot.png`/`dataset_step1.jld2` from the `test.jl` re-run — the latter two turned out to already be **tracked** in git, unlike the untracked-artifact convention documented elsewhere in this file (Part 4, Part 12), so they were restored via `git checkout --` rather than left deleted; worth a note for future sessions, since it means not every `.jld2`/`.png` this project produces is actually untracked, despite the stated convention).
 
 **Plan closure.** With this promotion done and real-scale runs explicitly deferred to the user, `CLAUDE.md`'s three-step Plan is marked closed — see that file's own "Plan — CLOSED" summary, which now points here for the full history rather than repeating it. This `DESIGN.md` file keeps everything above (Parts 1-13) as the permanent working-history record; a new goal, when one arrives, gets its own new Part here and its own new numbered step in `CLAUDE.md`'s Plan, rather than reopening this one.
+
+---
+
+## Part 14 — New goal: resonant single-stage B-spline drive variant (discussion, nothing implemented)
+
+The new goal referenced by `CLAUDE.md`'s new (reopened) Plan section. Introduced by the user via a short document, "Fock State Preparation / NN," Section I ("SYSTEM") plus subsection A ("New task"), describing a second, independent control protocol on the same qubit+HBAR system `:FL_1step_3p` already uses — not a revision of it. This Part records the document's own content and the discussion that resolved its open points; **no code exists for this yet**, and the copy-pasteable LaTeX rewrite the user asked for is reproduced at the end of this Part.
+
+### The document's own framing
+
+Same lab-frame system as `:FL_1step_3p`'s starting point: qubit `Hq = (ℏωq/2)σz`, HBAR mode `Hm = ℏωm b†b`, dipole coupling `Hint = g(b+b†)σx`, and a general drive `Hdrive = ℏ(Ω(t)σ+e^{iωdt} + Ω*(t)σ−e^{-iωdt})`, giving `Hlab = Hq+Hm+Hint+Hdrive`.
+
+The new task (its own subsection A) proposes a *modified* Hamiltonian,
+```
+Hon = g(σ+b + σ−b†) + Ω(t)σ+ + Ω*(t)σ− = g(σ+b + σ−b†) + ΩRe(t)σx − ΩIm(t)σy,
+```
+and asks `NNQuantum` to predict the drive functions `ΩRe(t)`/`ΩIm(t)` (decomposed on a B-spline basis) that reproduce the Fock ladder at each step, "in the same fashion of the three-parameters drive already implemented" — i.e. a second variant alongside `:FL_1step_3p`, not its replacement. Two structural differences from `:FL_1step_3p` are stated directly in the document: the pulse duration/time support is no longer an NN output (previously it was) — instead it's sampled from a space, used to generate the dynamics, and fed into the NN as an input feature; and the NN's output layer is the B-spline coefficient decomposition rather than three scalar pulse parameters.
+
+### Discussion, resolving the document's open points
+
+**1. What frame, and what happens to the bare energy term?** `Hon` as written carries no `ωq`/`ωm` term at all, unlike `:FL_1step_3p`'s rotating-frame `H0` (which keeps a `Δ0·n_q` term, `Δ0=ωq-ωm`). User's answer: this variant assumes full resonance, `ωm=ωq=ωd`, so `Δ0=0` exactly — a genuinely different, more special case than `:FL_1step_3p`'s generic `Δ0≠0`, not a relabeling of the same frame. Concretely, this variant's `Qubit`/`HarmonicOscillator` are both built at `ω=0`, so the composite system's bare Hamiltonian vanishes identically, leaving only the static JC coupling and the time-dependent drive — needs its **own** `CompositeSystem`, separate from `:FL_1step_3p`'s (different constructor frequencies), coexisting in `FockLadder_problem.jl` rather than replacing it.
+
+**2. One stage or two?** User's answer: single stage, one continuous drive window governed by `ΩRe(t)`/`ΩIm(t)` together — no spin-flip/SWAP split. This replaces `:FL_1step_3p`'s two sequential `evolve` calls with one `evolve` call over `[t0,t0+T]`; the free-form complex drive is expected to do both jobs (flip and swap) within that one window, which is plausible only *because* the drive shape is now free-form (spline-decomposed) rather than a fixed pulse shape — a fixed-shape single drive couldn't do this, which is presumably why `:FL_1step_3p` needed two stages in the first place.
+
+**Verified algebraically** (not stated in the document, checked in discussion): with `σ± = (σx±iσy)/2` and `Ω=ΩRe+iΩIm`,
+```
+Ωσ+ + Ω*σ− = ΩReσx − ΩImσy
+```
+exactly, confirming `Hon` is correct as written and needs no additional carrier term (`e^{iωdt}`) — the resonant rotating frame already absorbs it, unlike `Hdrive`'s lab-frame form.
+
+**3. B-spline hyperparameters.** Deliberately deferred — see "Left open" in `CLAUDE.md`'s Plan section (package choice, order, coefficient count, knot placement, whether `ΩRe`/`ΩIm` share a knot vector). Flagged by the user explicitly as "to be checked and updated later," not part of this discussion pass.
+
+**4. Infidelity — one, at the end, for now.** User confirmed: a single infidelity (final state vs. target), computed once at the end of the trajectory — not `:FL_1step_3p`'s two (spin-flip-stage infidelity + full-protocol infidelity), consistent with there being only one stage now. User raised, but explicitly deferred, a possible future extension: computing infidelity at intermediate checkpoints along the trajectory (e.g. quarter-fractions of `T`) for potentially richer supervision — noted here for later, not designed.
+
+A side effect worth recording: `:FL_1step_3p`'s NN input width is `d²` (decom_basis) + 2 (two infidelities). This variant's is `d²` + 1 (one infidelity) + 1 (duration `T`) — the same total width, `d²+2`, with one infidelity slot repurposed as a duration slot. Not something the user asked for; noticed while comparing the two feature-vector layouts, and flagged to the user as a nice consistency check rather than assumed to be load-bearing.
+
+**5. Coexistence, confirmed.** User: "`:FL_1step_3p` still exists, this is a variant. So keep both in `FockLadder_problem.jl`." Settles the scope question directly — this is additive, not a migration.
+
+### Left open (unchanged from `CLAUDE.md`'s Plan section, not repeated in full here)
+
+B-spline package/order/coefficient-count/knot-placement; whether `decom_basis` is shared between the two variants or this one gets its own; whether the four dissipators (`thermal_bath`, `Dephasing`, `Decay`) really do carry over unchanged onto the resonant composite system (assumed, not yet confirmed by the user); naming for this variant's functions.
+
+### Copy-pasteable LaTeX (the document, rewritten complete with the above)
+
+```latex
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+
+\begin{document}
+
+\section{System}
+
+The system under analysis consists of a superconducting qubit coupled to a
+HBAR. The former is described as a two-level quantum system with transition
+frequency $\omega_q$. The two energetic levels, in the computational basis,
+are written as $|0\rangle_q = \begin{bmatrix}1\\0\end{bmatrix}$ and
+$|1\rangle_q = \begin{bmatrix}0\\1\end{bmatrix}$, i.e., eigenvectors of the
+$z$-Pauli operator $\sigma_z$. The qubit Hamiltonian is given by
+$\mathcal{H}_q = \dfrac{\hbar\omega_q}{2}\sigma_z$. The qubit is tuned by a
+drive whose general time-dependent Hamiltonian is
+\[
+  \mathcal{H}_{\mathrm{drive}} = \hbar\left(\Omega(t)\sigma_+ e^{i\omega_d t}
+  + \Omega^*(t)\sigma_- e^{-i\omega_d t}\right),
+\]
+with complex time-dependent amplitude $\Omega(t)$ and frequency $\omega_d$.
+
+The HBAR is modelled as a high-$Q$ single-mode mechanical resonator with
+characteristic frequency $\omega_m$ and Hamiltonian
+$\mathcal{H}_m = \hbar\omega_m n = \hbar\omega_m b^\dagger b$, where
+$n = b^\dagger b$ represents the number of mode excitations or phonons, and
+$b$, $b^\dagger$ are respectively the annihilation/creation operators (zero
+point energy is neglected).
+
+The qubit-resonator interaction is a dipole-coupling-like term described by
+the bilinear Hamiltonian $\mathcal{H}_{\mathrm{int}} = g(b+b^\dagger)\sigma_x$,
+modulated by the interaction strength $g$. Collecting these ingredients, the
+Hamiltonian in the laboratory frame is
+\begin{equation}
+  \mathcal{H}_{\mathrm{lab}} = \mathcal{H}_q + \mathcal{H}_m
+  + \mathcal{H}_{\mathrm{int}} + \mathcal{H}_{\mathrm{drive}}.
+  \label{eq:Hlab}
+\end{equation}
+
+\subsection{New task}
+
+The new task to run on \texttt{NNQuantum} is to predict the best functions
+$\Omega_{\mathrm{Re}}(t)$ and $\Omega_{\mathrm{Im}}(t)$, representing the
+drive in a modified HBAR-qubit Hamiltonian,
+\begin{equation}
+  \mathcal{H}_{\mathrm{on}}
+    = g\left(\sigma_+ b + \sigma_- b^\dagger\right)
+      + \Omega(t)\sigma_+ + \Omega^*(t)\sigma_-
+    = g\left(\sigma_+ b + \sigma_- b^\dagger\right)
+      + \Omega_{\mathrm{Re}}(t)\sigma_x - \Omega_{\mathrm{Im}}(t)\sigma_y,
+  \label{eq:Hon}
+\end{equation}
+which are able to reproduce the Fock ladder at each step, in the same
+fashion as the three-parameter drive already implemented
+(\texttt{:FL\_1step\_3p}). This is a genuinely new protocol variant,
+coexisting with \texttt{:FL\_1step\_3p} rather than replacing it.
+
+\subsubsection{Resonance condition}
+
+This variant assumes the fully resonant regime,
+\begin{equation}
+  \omega_m = \omega_q = \omega_d,
+  \label{eq:resonance}
+\end{equation}
+so that the qubit-oscillator detuning $\Delta_0 = \omega_q-\omega_m$
+vanishes exactly. Unlike \texttt{:FL\_1step\_3p}'s rotating frame (which
+keeps a residual $\Delta_0\, n_q$ term), the bare energy term vanishes
+identically here — both subsystems are constructed at $\omega=0$, and
+Eq.~\eqref{eq:Hon} is the *complete* Hamiltonian, with no additional
+detuning/bare term to add. The complex drive envelope is
+\begin{equation}
+  \Omega(t) = \Omega_{\mathrm{Re}}(t) + i\,\Omega_{\mathrm{Im}}(t),
+  \label{eq:Omega-complex}
+\end{equation}
+and, using $\sigma_\pm = (\sigma_x \pm i\sigma_y)/2$, one directly checks
+$\Omega\sigma_+ + \Omega^*\sigma_- = \Omega_{\mathrm{Re}}\sigma_x -
+\Omega_{\mathrm{Im}}\sigma_y$, confirming Eq.~\eqref{eq:Hon} needs no
+separate carrier term — the resonant rotating frame already absorbs it.
+
+\subsubsection{Single-stage protocol}
+
+Unlike \texttt{:FL\_1step\_3p}'s two-stage protocol (a spin-flip stage
+followed by a SWAP stage), this variant uses a single continuous drive
+window: the dynamics are generated by Eq.~\eqref{eq:Hon} over one interval
+$[t_0, t_0+T]$, with no intermediate hand-off. The pulse duration/time
+support $T$ is not fixed in advance (unlike $\tau_{\mathrm{exc}}$/
+$\tau_{\mathrm{SWAP}}$, previously outputs of the NN); instead $T$ is
+sampled from a to-be-chosen space and used both to generate that sample's
+dynamics and as a feature in the NN's input layer.
+
+\subsubsection{Drive parameterization}
+
+$\Omega_{\mathrm{Re}}(t)$ and $\Omega_{\mathrm{Im}}(t)$ are continuous
+functions, each decomposed on a B-spline basis $\{B_k\}_{k=1}^{n_b}$ over
+$[0,T]$:
+\begin{equation}
+  \Omega_{\mathrm{Re}}(t) = \sum_{k=1}^{n_b} c_k^{\mathrm{Re}} B_k(t), \qquad
+  \Omega_{\mathrm{Im}}(t) = \sum_{k=1}^{n_b} c_k^{\mathrm{Im}} B_k(t),
+  \qquad t\in[0,T].
+  \label{eq:bspline}
+\end{equation}
+Spline order, coefficient count $n_b$, and knot placement are left open —
+to be checked and updated later.
+
+\subsubsection{Dataset and network structure}
+
+For each sampled duration $T$ and each sampled coefficient set
+$(c^{\mathrm{Re}}, c^{\mathrm{Im}})$, the dynamics generated by
+Eq.~\eqref{eq:Hon}/\eqref{eq:bspline} over $[t_0,t_0+T]$ produce a final
+state $\rho(t_0+T)$. One dataset row is built as:
+\begin{itemize}
+  \item \textbf{NN input}: expectation values of $\rho(t_0+T)$ on a random
+    orthonormal Hermitian operator basis (the same construction
+    \texttt{:FL\_1step\_3p} already uses) $\oplus$ the infidelity between
+    $\rho(t_0+T)$ and the target state $\oplus$ the duration $T$.
+  \item \textbf{NN output}: the B-spline coefficients
+    $(c^{\mathrm{Re}}, c^{\mathrm{Im}})$.
+\end{itemize}
+The target state for ladder step $n$ is
+$|{\downarrow}\rangle_q \otimes |n\rangle_{\mathrm{osc}}$ directly — no
+intermediate spin-flip target, since there is no separate stage. The
+infidelity is computed once, at the final time, for now; computing it at
+intermediate checkpoints (e.g. quarter-fractions of $T$) for richer
+supervision is a possible future extension, not part of this design.
+
+\end{document}
+```
