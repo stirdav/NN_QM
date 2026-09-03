@@ -6,15 +6,21 @@
 #   1. Environment activation + including the problem definition
 #      (FockLadder_problem.jl) — step 1's scope, unchanged from before the
 #      rename.
-#   2. run_Fock_ladder(N_steps; ...) — a generic-N_steps loop
+#   2. run_Fock_ladder(N_steps, basis_id; ...) — a generic-N_steps loop
 #      structured around the user's own generate/train/predict/reiterate
 #      algorithm (CLAUDE.md's Plan, step 3), not old_version's
 #      execution_dynamic_FL directly. Per step: generates and saves one
 #      FL_1step_3p dataset, trains a NN on it and predicts drive parameters
 #      for the target state (FockLadder_problem.jl's train_NN/
 #      predict_drive_parameters, thin wrappers around NNQuantum.jl's
-#      problem-agnostic machinery), and reiterates using the state the
-#      prediction actually reaches — see run_Fock_ladder's own docstring.
+#      problem-agnostic machinery), saves the prediction and plots its
+#      trajectory, and reiterates using the state the prediction actually
+#      reaches — see run_Fock_ladder's own docstring.
+#
+#   This is the version staged-validated in test.jl (N_steps=1 then 2, see
+#   DESIGN.md Parts 11-13 and test_log.md) and promoted here once reviewed —
+#   test.jl itself now only holds the smaller step-1/2 smoke tests it started
+#   with.
 #
 # Run from NNQuantum/ (REPL: include("FockLadder_execution.jl"), or
 # `julia FockLadder_execution.jl`). Including this file only activates the
@@ -76,6 +82,9 @@ end
 _decom_basis_path(basis_id, save_dir) = joinpath(save_dir, "decom_basis_b$(basis_id).jld2")
 _dataset_path(basis_id, step, save_dir) = joinpath(save_dir, "dataset_step$(step)_b$(basis_id).jld2")
 _nn_path(basis_id, step, save_dir) = joinpath(save_dir, "nn_step$(step)_b$(basis_id).jld2")
+_predicted_path(basis_id, step, save_dir) = joinpath(save_dir, "predicted_step$(step)_b$(basis_id).jld2")
+_trajectory_plot_path(basis_id, step, save_dir) = joinpath(save_dir, "trajectory_step$(step)_b$(basis_id).png")
+_full_trajectory_plot_path(basis_id, save_dir) = joinpath(save_dir, "trajectory_full_b$(basis_id).png")
 
 """
     generate_decom_basis(basis_id::Integer; save_dir=@__DIR__, overwrite=false)
@@ -207,6 +216,29 @@ every step) or a `Vector{Symbol}` (one per step, checked against `N_steps`).
   (`:train_new`/`:continue_training`) — this is what supplies the
   checkpoints `:continue_training`/`:fixed` load in a later step or a later
   run. Pass `nothing` to skip saving.
+
+**Also saves each step's prediction and plots its trajectory.** Every step's
+predicted `(τ_exc,ωd,τ_SWAP)` and its infidelity are saved via
+`save_prediction` to `predicted_step<n>_b<id>.jld2`; that step's own
+predicted trajectory (⟨n_qubit⟩/⟨n_osc⟩, via `FLstep_dynamics_3p_dense` +
+`plot_trajectory`) is plotted to `trajectory_step<n>_b<id>.png`; and, once
+every step is done, one cumulative plot spanning the whole run (every step's
+dense trajectory concatenated in absolute time, so a multi-step run's
+`⟨n_osc⟩` climb is visible in one picture, not just isolated per-step
+windows) is saved to `trajectory_full_b<id>.png`.
+
+**Returns** `(decom_basis, infidelities, predictions, models, final_states)`
+— matching `Chu_DFL_execution.ipynb`'s own `execution_dynamic_FL` return
+shape (`return SUN_basis, infidelities, predictions, models, final_states`),
+one entry per step for the last four. `models` holds this project's own
+richer per-step bundle (`train_NN`'s/`load_nn`'s `NamedTuple` — model plus
+normalization stats), not `old_version`'s bare `Flux.Chain`.
+
+This function was validated end-to-end (staged, `N_steps=1` then `N_steps=2`,
+at small/fast hyperparameters) before being promoted here from a `test.jl`
+validation copy — see `DESIGN.md` Parts 11-13 and `test_log.md` for the run
+record. Running it at real scale (`old_version`'s own `n_samples=800`,
+`epochs=350`) is left to the user, not yet done.
 """
 function run_Fock_ladder(N_steps::Integer, basis_id::Integer;
                                     n_samples::Integer=800,
@@ -244,6 +276,24 @@ function run_Fock_ladder(N_steps::Integer, basis_id::Integer;
     t0 = 0.0
     # --- 0. True ground state: the starting initial condition ---
     initial_state = spindown(qubit_basis) ⊗ fockstate(osc_basis, 0)
+
+    infidelities = Float64[]
+    predictions = Any[]
+    models = Any[]
+    final_states = Any[]
+
+    # Accumulators for the one cumulative full-run plot, spanning every
+    # step's dense trajectory concatenated in absolute time — as opposed to
+    # each step's own per-step plot below, which only ever shows that step's
+    # own window. Each step's dense_tspan/dense_states already sits at the
+    # right absolute time (t0 carries forward correctly across steps, never
+    # reset), so concatenation needs no time-shifting — only dropping each
+    # step-after-the-first's leading point, which duplicates the previous
+    # step's very last (t, state) pair (same convention FLstep_dynamics_3p/
+    # FLstep_dynamics_3p_dense already use to join their own two stages).
+    all_tspan = Float64[]
+    all_states = Any[]
+    boundary_times = Float64[]   # every spin-flip/SWAP split and step-to-step transition, for vlines
 
     for step in 1:N_steps
         # --- Target states for this step (mirrors creation_step_states) ---
@@ -326,13 +376,59 @@ function run_Fock_ladder(N_steps::Integer, basis_id::Integer;
 
         println("step $(step)/$(N_steps): predicted (τ_exc,ωd,τ_SWAP) = $(predicted_output), infidelity = $(prediction_infidelity)")
 
-        # --- 4. Reiterate with the state the predicted parameters actually reach ---
+        # --- Save the prediction ---
+        predicted_path = _predicted_path(basis_id, step, save_dir)
+        save_prediction(predicted_path, predicted_output, prediction_infidelity;
+            description="FL_1step_3p ladder step $(step) predicted (τ_exc,ωd,τ_SWAP) (basis_id=$(basis_id))",
+            params=Dict{Symbol,Any}(:step=>step, :basis_id=>basis_id, :t0=>t0))
+        println("step $(step)/$(N_steps): saved predicted parameters to $(predicted_path)")
+
+        # --- Plot this step's predicted trajectory, using its pre-advance (t0, initial_state) ---
         τ_exc_pred, ωd_pred, τ_SWAP_pred = predicted_output
+        dense_tspan, dense_states = FLstep_dynamics_3p_dense(t0, initial_state, τ_exc_pred, ωd_pred, τ_SWAP_pred)
+        plot_path = _trajectory_plot_path(basis_id, step, save_dir)
+        plot_trajectory(dense_tspan, dense_states,
+            ["n_qubit" => op(cs, :qubit, :n), "n_osc" => op(cs, :osc, :n)];
+            title="run_Fock_ladder step $(step)/$(N_steps) — predicted trajectory (basis_id=$(basis_id))",
+            ylabel="⟨n⟩", vlines=[t0 + τ_exc_pred], save_path=plot_path)
+        println("step $(step)/$(N_steps): saved predicted-trajectory plot to $(plot_path)")
+
+        # Fold this step's dense trajectory into the running full-trajectory
+        # accumulators — drop the leading point for every step after the
+        # first, since it duplicates the previous step's own last (t, state) pair.
+        if step == 1
+            append!(all_tspan, dense_tspan)
+            append!(all_states, dense_states)
+        else
+            append!(all_tspan, dense_tspan[2:end])
+            append!(all_states, dense_states[2:end])
+        end
+        push!(boundary_times, t0 + τ_exc_pred)                 # this step's spin-flip/SWAP split
+        push!(boundary_times, t0 + τ_exc_pred + τ_SWAP_pred)   # this step's end / next step's start
+
+        push!(infidelities, prediction_infidelity)
+        push!(predictions, predicted_output)
+        push!(models, nn)
+        push!(final_states, predicted_state)
+
+        # --- 4. Reiterate with the state the predicted parameters actually reach ---
         t0 += τ_exc_pred + τ_SWAP_pred
         initial_state = predicted_state
     end
 
-    nothing
+    # One cumulative plot spanning every step's dense trajectory, concatenated
+    # in absolute time — shows whether ⟨n_osc⟩ actually climbs 0→1→2→...
+    # across the whole run, which no single per-step plot can show on its
+    # own. Always produced, even for N_steps=1 (identical to that step's own
+    # per-step plot then, just under its own file name).
+    full_plot_path = _full_trajectory_plot_path(basis_id, save_dir)
+    plot_trajectory(all_tspan, all_states,
+        ["n_qubit" => op(cs, :qubit, :n), "n_osc" => op(cs, :osc, :n)];
+        title="run_Fock_ladder — full predicted trajectory (basis_id=$(basis_id), N_steps=$(N_steps))",
+        ylabel="⟨n⟩", vlines=boundary_times, save_path=full_plot_path)
+    println("saved full predicted-trajectory plot ($(N_steps) step(s)) to $(full_plot_path)")
+
+    return decom_basis, infidelities, predictions, models, final_states
 end
 
 # Not called on include — dataset generation at realistic n_samples takes

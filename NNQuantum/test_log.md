@@ -28,3 +28,7 @@
 
 Both the single-step (N_steps=1) and two-step, ladder-chaining (N_steps=2, step 1 reused, step 2 fresh) runs of the train/predict/reiterate algorithm completed mechanically correctly and were visually confirmed by the user as physically sensible. This is the staged validation called for by (v) in `CLAUDE.md`'s Plan (step 3) — the 0-4 loop, including reiterating from a *predicted* (imperfect) state rather than the target state, works as designed at this small/fast hyperparameter scale.
 
+## Promotion — 2026-09-03
+
+The `run_Fock_ladder`/`generate_decom_basis` code validated above (then a `test.jl`-local copy) was promoted into `FockLadder_execution.jl` as the project's one, standard version — same algorithm, now saving/plotting predictions as default behavior. Re-verified after promotion with a fresh `N_steps=2` smoke run (`n_samples=6`, `epochs=3`) in a scratch directory: both steps completed, all expected files produced, return value unpacked correctly. `CLAUDE.md`'s three-step Plan is now marked closed; see `DESIGN.md` Part 13 for the full promotion record. Real-scale runs (`n_samples=800`, `epochs=350`) are left to the user, not part of this validation.
+

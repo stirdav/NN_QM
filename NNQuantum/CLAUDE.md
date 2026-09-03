@@ -14,7 +14,21 @@ The two parts below (Part 1, Part 2) analyze `old_version/` and `QuantumDynamics
 
 ---
 
-## Plan
+## Plan — CLOSED
+
+The three-step plan below (rewrite the dynamics on `QuantumDynamics`, validate it, then build a general ML engine on top) is **complete**. This section now records only final status and what's explicitly deferred; the full history of how each step got there — design questions worked through, bugs caught by testing, things tried and reverted — lives in `DESIGN.md` (Parts 1-13), not here. A future goal gets its own new Plan section below this closed one, rather than reopening it.
+
+1. **Rewrite the HBAR-qubit problem on `QuantumDynamics`, scoped to `:FL_1step_3p`.** Done. `FockLadder_problem.jl` holds the full system setup: physical parameters, the subsystems/composite system (`cs`), the Jaynes-Cummings Hamiltonian (`H0` — built *exactly*, not approximately, in the rotating frame; see `DESIGN.md` Part 3(d) for the derivation), the four dissipators (`J`), and the two-stage protocol runner (`FLstep_dynamics_3p`/`FLstep_dynamics_3p_dense`). See `DESIGN.md` Part 3 for the full (a)-(g) breakdown.
+
+2. **Validate the rewritten dynamics.** Done. The qualitative shape this step asked for — population swapping between qubit and mechanical mode across the two stages — is confirmed both by `test.jl`'s own smoke test and, more substantively, by the trajectories plotted during step 3's staged validation (logged in `test_log.md`). See `DESIGN.md` Part 3's closing note and Part 12.
+
+3. **Translate `old_version`'s ML engine, kept problem-agnostic.** Done. `NNQuantum.jl` holds the general train/normalize/predict machinery — nothing in it references a pulse parameter, `decom_basis`, or `FLstep_dynamics_3p` by name (see `NNQuantum_API.md` for the full function reference). `FockLadder_problem.jl`'s `train_NN`/`predict_drive_parameters` are the thin `:FL_1step_3p`-specific wrappers around it. `FockLadder_execution.jl`'s `generate_decom_basis`/`run_Fock_ladder` drive the full 0-4 generate→train→predict→reiterate loop across an arbitrary number of Fock-ladder steps, chaining from the state a real (imperfect) prediction actually reaches — not the target state, the entire point of the algorithm. This was confirmed by staged validation at `N_steps=1` and `N_steps=2` (small/fast hyperparameters, user-reviewed trajectory plots, logged in `test_log.md`), then promoted from its `test.jl`-local validation copy into `FockLadder_execution.jl` itself, replacing the earlier, never-validated placeholder version there; `test.jl` reverted to its own smaller step 1-4 smoke tests. See `DESIGN.md` Parts 4-13.
+
+**Left for later, deliberately outside this closed plan's scope:**
+- **Real-scale runs.** Everything above was validated at small, fast hyperparameters (`n_samples≈150`, `epochs≈60`). Running `run_Fock_ladder` at the scale `old_version`'s own notebook used (`n_samples=800`, `epochs=350`, `N_steps=6`) has not been done — left to the user to run separately, whenever and however they choose.
+
+<details>
+<summary>Original coarse-grained plan text and full step-by-step status log (historical, superseded by the closure above — kept for reference only)</summary>
 
 Coarse-grained, three-step plan for turning the two independent analyses above into `NNQuantum`'s actual content. Step 1 is broken into sub-points (a–g); Step 1's sub-points are elaborated further in `DESIGN.md`. Steps 2 and 3 are intentionally left coarse — they get their own refinement pass once the step before them is done.
 
@@ -67,6 +81,10 @@ Coarse-grained, three-step plan for turning the two independent analyses above i
    **Two prerequisites for (v)'s staged validation, checked/added before starting it.** Dataset save/reopen was already there and working (`save_dataset`/`load_dataset`, already exercised by `dataset_mode=:load`) — nothing added. Trajectory plotting for chosen observables was genuinely missing — added as `NNQuantum.jl`'s `plot_trajectory(tspan, states, observables; ...)`, problem-agnostic like the rest of that file, plus `FockLadder_problem.jl`'s `FLstep_dynamics_3p_dense` (promoted from `test.jl`'s own test-local helper) to actually supply a plottable — not just 3-point — predicted trajectory. New standing rule from the user: any function added to `NNQuantum.jl` gets `NNQuantum_API.md` updated in the same pass — done here. See `DESIGN.md` Part 11.
 
    **Status: (v)'s staged validation run and confirmed successful, both N_steps=1 and N_steps=2.** Per the user's explicit scoping choice, this was done via a copy of `run_Fock_ladder`/`generate_decom_basis` inside `test.jl` (saving predictions, plotting a per-step and one cumulative trajectory, returning `(decom_basis, infidelities, predictions, models, final_states)` — matching `Chu_DFL_execution.ipynb`'s own `execution_dynamic_FL` return shape, per explicit request) — `FockLadder_execution.jl`'s own `run_Fock_ladder` was left untouched. At small/fast hyperparameters (`n_samples=150`, `epochs=60`, `hidden=128`), N_steps=1 gave infidelity 0.044; N_steps=2 reused step 1's already-reviewed NN exactly (`nn_mode=:fixed`, bit-identical prediction) and trained step 2 fresh (infidelity 0.081), with the cumulative plot showing `⟨n_osc⟩` stepping `0→~0.9→~1.8` — a clean two-rung ladder climb, chained from the *predicted* state at each step, not the target. Both runs visually confirmed by the user; logged in the new `NNQuantum/test_log.md`. See `DESIGN.md` Part 12. Left open: whether to promote the now-more-capable `test.jl` copy back into `FockLadder_execution.jl`'s own `run_Fock_ladder`. The run's own generated `.jld2`/`.png` artifacts (all untracked in git) were deleted from `NNQuantum/` afterward, at the user's request — `test_log.md`'s written record is what documents the result now, not the regenerable files themselves.
+
+   **Final update — promoted, plan closed.** The "left open" question above is resolved: the validated `test.jl` copy of `run_Fock_ladder`/`generate_decom_basis` replaced the original in `FockLadder_execution.jl` (same signature, now saving/plotting predictions and returning the 5-tuple as standard behavior, not a validation-only extra); `test.jl` reverted to its original sections 1-4. Verified after promotion: `FockLadder_execution.jl` loads cleanly and a fresh `run_Fock_ladder(2, <basis>; n_samples=6, epochs=3, hidden=8, ...)` call runs both steps end-to-end (datasets, NNs, predictions, per-step and cumulative plots all produced); `test.jl` re-run end-to-end, unaffected. With this, the three-step plan is complete — see "Plan — CLOSED" at the top of this section. Real-scale runs (`n_samples=800`, `epochs=350`, per `old_version`'s own notebook) are left to the user. See `DESIGN.md` Part 13.
+
+</details>
 
 ---
 
