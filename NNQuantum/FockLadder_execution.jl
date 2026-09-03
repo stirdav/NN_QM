@@ -10,11 +10,11 @@
 #      structured around the user's own generate/train/predict/reiterate
 #      algorithm (CLAUDE.md's Plan, step 3), not old_version's
 #      execution_dynamic_FL directly. Per step: generates and saves one
-#      FL_1step_3p dataset (live), then trains a NN and predicts drive
-#      parameters for the target state (both unimplemented stubs — step 3
-#      hasn't started) and would reiterate using the state the prediction
-#      actually reaches. Without a real prediction, the loop stops after
-#      step 1's dataset — see run_Fock_ladder's own docstring.
+#      FL_1step_3p dataset, trains a NN on it and predicts drive parameters
+#      for the target state (FockLadder_problem.jl's train_NN/
+#      predict_drive_parameters, thin wrappers around NNQuantum.jl's
+#      problem-agnostic machinery), and reiterates using the state the
+#      prediction actually reaches — see run_Fock_ladder's own docstring.
 #
 # Run from NNQuantum/ (REPL: include("FockLadder_execution.jl"), or
 # `julia FockLadder_execution.jl`). Including this file only activates the
@@ -56,7 +56,9 @@ osc_basis   = getsubsystem(cs, :osc).basis
 # own SUN_basis.
 
 """
-    run_Fock_ladder(N_steps; n_samples=800, dim_parameters_space=[100,100,100], save_dir=@__DIR__)
+    run_Fock_ladder(N_steps; n_samples=800, dim_parameters_space=[100,100,100],
+                    save_dir=@__DIR__, train_fraction=0.9375, hidden=500, η=1e-4,
+                    epochs=350, loss=:mse, batch_size=32)
 
 Drive the Fock ladder up `N_steps` rungs following the user's train/predict/
 reiterate algorithm (see CLAUDE.md's Plan, step 3), not `old_version`'s
@@ -74,21 +76,36 @@ around this project's own step numbering):
      *actually* reach (not the target state itself) as next step's initial
      condition, until `N_steps` is reached.
 
-**Status: only step 1 (and step 0's starting state) is implemented.** Steps
-2 and 3 (NN training, NN prediction) are unimplemented stubs — step 3 of
-`CLAUDE.md`'s plan hasn't started. Without a real prediction, step 4 has
-nothing honest to reiterate with, so the loop generates step 1's dataset
-and then stops (`@warn` + `break`) rather than faking an advance — an
-earlier version of this function advanced using each step's *target* state
-and nominal pulse timing (assuming the ladder climbs perfectly); that
-placeholder didn't reflect the intended algorithm (the whole point of
-steps 2-4 is to advance using the state a *predicted*, imperfect pulse
-actually reaches) and has been removed, not fixed.
+**Status: all five steps (0-4) are implemented — DESIGN.md Part 6 (iv).**
+Steps 2-3 are `train_NN`/`predict_drive_parameters` (`FockLadder_problem.jl`),
+thin `:FL_1step_3p`-specific wrappers around `NNQuantum.jl`'s generic
+`train_and_test_NN`/`predict_and_score`; the keyword arguments here
+(`train_fraction`/`hidden`/`η`/`epochs`/`loss`/`batch_size`) just pass
+through to those, defaulting to `Chu_DFL_execution.ipynb`'s own
+`:FL_1step_3p`/`:master_dynamic` cell values where that cell has an
+equivalent (`batch_size` doesn't — see `NNQuantum.jl`'s own note on
+`train_model!` for why mini-batching was added on top of the port). Step 4
+no longer needs its own re-simulation call: `predict_drive_parameters`
+already returns the state its predicted pulse actually reaches
+(`predict_and_score`'s `final_state`, scored against `target_final` by
+infidelity in the same call), so that's what's carried forward as next
+step's `initial_state` directly — no second `FLstep_dynamics_3p` call over
+the same parameters. The earlier placeholder that advanced using each
+step's *target* state and nominal pulse timing (assuming the ladder climbs
+perfectly) was removed, not fixed, once this real prediction existed to
+replace it, per the restructure documented further up this file's own
+history in `DESIGN.md`.
 """
 function run_Fock_ladder(N_steps::Integer;
                                     n_samples::Integer=800,
                                     dim_parameters_space::Vector{<:Integer}=[100, 100, 100],
-                                    save_dir::AbstractString=@__DIR__)
+                                    save_dir::AbstractString=@__DIR__,
+                                    train_fraction::Real=0.9375,
+                                    hidden::Integer=500,
+                                    η::Real=1e-4,
+                                    epochs::Integer=350,
+                                    loss::Union{Function,Symbol}=:mse,
+                                    batch_size::Integer=32)
     d_dataset = length(cs.basis)
     decom_basis = rand_hermitian_orthonormal_basis(d_dataset, cs.basis)
 
@@ -125,21 +142,21 @@ function run_Fock_ladder(N_steps::Integer;
 
         println("step $(step)/$(N_steps): saved $(n_samples)-sample dataset to dataset_step$(step).jld2")
 
-        # --- 2. Train a NN on (inputs, outputs) --- NOT IMPLEMENTED
-        model = nothing  # model = train_NN(inputs, outputs)
+        # --- 2. Train a NN on (inputs, outputs) ---
+        nn = train_NN(inputs, outputs; train_fraction=train_fraction, hidden=hidden, η=η,
+                      epochs=epochs, loss=loss, batch_size=batch_size)
 
-        # --- 3. Predict the drive parameters that reach target_final --- NOT IMPLEMENTED
-        predicted_params = nothing  # predicted_params = predict_drive_parameters(model, target_final, decom_basis)
+        # --- 3. Predict the drive parameters that reach target_final ---
+        predicted_output, predicted_state, prediction_infidelity =
+            predict_drive_parameters(nn, t0, initial_state, target_final, decom_basis)
+
+        println("step $(step)/$(N_steps): test error = $(nn.test_error), " *
+                "predicted (τ_exc,ωd,τ_SWAP) = $(predicted_output), infidelity = $(prediction_infidelity)")
 
         # --- 4. Reiterate with the state the predicted parameters actually reach ---
-        if predicted_params === nothing
-            @warn "step $(step)/$(N_steps): NN training/prediction not implemented yet — stopping after dataset generation."
-            break
-        end
-        τ_exc_pred, ωd_pred, τ_SWAP_pred = predicted_params
-        _, states = FLstep_dynamics_3p(t0, initial_state, τ_exc_pred, ωd_pred, τ_SWAP_pred)
+        τ_exc_pred, ωd_pred, τ_SWAP_pred = predicted_output
         t0 += τ_exc_pred + τ_SWAP_pred
-        initial_state = states[end]
+        initial_state = predicted_state
     end
 
     nothing

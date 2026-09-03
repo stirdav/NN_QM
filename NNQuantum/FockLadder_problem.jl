@@ -71,9 +71,10 @@ N_mech = 5;
 # ωm, per (d) below — Qubit gets Δ0 = ωq - ωm (not the bare ωq), the mechanical
 # oscillator gets 0.0 (not the bare ωm).
 using QuantumDynamics
-using QuantumOptics   # fidelity/expect/Ket/Operator/dm — needed directly by (h) below
-using LinearAlgebra   # qr — needed by (h)'s rand_hermitian_orthonormal_basis
+using QuantumOptics   # expect — needed directly by (h) below
 using JLD2            # jldsave — needed by (h)'s save_dataset
+
+include("NNQuantum.jl")   # qo_infidelity, rand_hermitian_orthonormal_basis, threeD_parameter_space — needed by (h) below
 
 qubit = Qubit(:qubit, Δ0)
 osc   = HarmonicOscillator(:osc, 0.0; nmax=N_mech)
@@ -200,12 +201,11 @@ end
 # the same names for direct correspondence.
 #
 # The generic helpers those two depend on (qo_infidelity,
-# rand_hermitian_orthonormal_basis, threeD_parameter_space) live in
-# old_version's ML_QM_library.jl — the problem-agnostic half of that
-# framework, not the problem file. NNQuantum has no such library file yet,
-# so they're ported here too, provisionally colocated with the
-# problem-specific functions; where they actually belong is for step 3 to
-# decide, not this addition.
+# rand_hermitian_orthonormal_basis, threeD_parameter_space) now live in
+# NNQuantum.jl (included above) — DESIGN.md Part 6 (i): they were
+# provisionally colocated here until that library file existed; it now
+# does, so they moved out. weighted_sample below is the one exception,
+# per NNQuantum.jl's own header note.
 #
 # weighted_sample replaces old_version's `sample(space, Weights(prob), n)`
 # (StatsBase) with a small hand-rolled cumulative-weight sampler, to avoid
@@ -215,66 +215,6 @@ function weighted_sample(items, weights, n)
     total = cumw[end]
     total > 0 || throw(ArgumentError("weighted_sample: all weights are zero"))
     return [items[searchsortedfirst(cumw, rand() * total)] for _ in 1:n]
-end
-
-# Ported unchanged from old_version/ML_QM_library.jl:294-303 (needs Julia's
-# Base.logrange for the third, log-spaced dimension — available since 1.11,
-# no extra dependency).
-function threeD_parameter_space(p, parameters_range, dim_parameters_space)
-    para1 = LinRange(parameters_range[1][1], parameters_range[1][2], dim_parameters_space[1])
-    para2 = LinRange(parameters_range[2][1], parameters_range[2][2], dim_parameters_space[2])
-    para3 = logrange(parameters_range[3][1], parameters_range[3][2], dim_parameters_space[3])
-
-    parameters_space = vec([(x, y, z) for x in para1, y in para2, z in para3])
-    prob = vec([p(x, y, z) for (x, y, z) in parameters_space])
-
-    return parameters_space, prob
-end
-
-# Mixed-state infidelity, 1 - min(fidelity,1) — ported from old_version/
-# ML_QM_library.jl:203-213, but collapsed from two separate Ket/Operator
-# methods into one via `_as_density_operator`: FLstep_dynamics_3p's own
-# states are always density operators (J is always passed, per (f)), while
-# a caller-supplied target state may still be given as a plain Ket.
-_as_density_operator(ψ::Ket) = dm(ψ)
-_as_density_operator(ρ::Operator) = ρ
-
-function qo_infidelity(a, b)
-    return 1.0 - min(real(fidelity(_as_density_operator(a), _as_density_operator(b))), 1.0)
-end
-
-# Ported unchanged (mod. renaming the inner loop variable that shadowed the
-# `basis` argument in old_version) from old_version/ML_QM_library.jl:65-97.
-# Generalizes Gell-Mann matrices to arbitrary dimension: d^2 random
-# Hermitian matrices, projected to an orthonormal set via QR of their
-# stacked real/imaginary-part vectorization, then re-Hermitized to correct
-# numerical QR error.
-function rand_hermitian_orthonormal_basis(d::Int, basis)
-    n = d^2
-    mats = Matrix{ComplexF64}[]
-    for _ in 1:n
-        A = randn(ComplexF64, d, d)
-        push!(mats, (A + A') / 2)
-    end
-
-    vecs = zeros(Float64, 2 * d * d, n)
-    for (i, H) in enumerate(mats)
-        vecs[1:d*d, i]     = real(vec(H))
-        vecs[d*d+1:end, i] = imag(vec(H))
-    end
-
-    Q, _ = qr(vecs)
-
-    half = d * d
-    ops = Matrix{ComplexF64}[]
-    for i in 1:n
-        real_part = reshape(Q[1:half, i], d, d)
-        imag_part = reshape(Q[half+1:end, i], d, d)
-        H = real_part + im * imag_part
-        push!(ops, (H + H') / 2)
-    end
-
-    return [Operator(basis, H) for H in ops]
 end
 
 # Direct port of old_version's FL_1step_3p_NN_outputs
@@ -376,4 +316,64 @@ function save_dataset(path::AbstractString, inputs, outputs;
         params=params,
     )
     nothing
+end
+
+# --- (iv) NN wrappers: train_NN / predict_drive_parameters --------------------
+#
+# DESIGN.md Part 6 (iv): closes run_Fock_ladder's steps 2-3 stubs
+# (FockLadder_execution.jl). These two functions are deliberately thin —
+# everything problem-agnostic (dataset splitting, normalization, model
+# architecture, the training/testing loop, the predict-then-resimulate-
+# then-score orchestration) lives in NNQuantum.jl (i)/(ii)/(iv) and is
+# called from here, not reimplemented. train_NN/predict_drive_parameters
+# are the only two places in this file that connect the two: everything
+# NNQuantum.jl itself touches is a plain matrix, vector, model, or a
+# `simulate` function value — it never sees a pulse parameter, a
+# decom_basis, or FLstep_dynamics_3p by name. That boundary is what makes
+# NNQuantum.jl's machinery reusable as-is for a different quantum problem,
+# or a different drive parameterization (e.g. :FL_1step_2drives's BSpline
+# coefficients, were it ever ported) — swapping in a new problem only ever
+# means writing a new pair of thin wrappers like these, never touching
+# NNQuantum.jl.
+#
+# train_NN converts FL_1step_3p_NN_outputs/_inputs's own return shapes —
+# inputs a Vector{Vector{Float64}} (one feature row per sample, from
+# FL_1step_3p_NN_inputs), outputs a Vector{NTuple{3,Float64}} (one
+# (τ_exc,ωd,τ_SWAP) sample per row, from weighted_sample drawing straight
+# out of threeD_parameter_space's tuple grid, not vectors) — into the
+# plain Float64 matrices NNQuantum.jl's train_and_test_NN expects (hence
+# `collect.(outputs)` below, turning each tuple into a vector `reduce(hcat,
+# ...)` can stack), then delegates entirely. train_fraction=0.9375 matches
+# Chu_DFL_execution.ipynb's own :FL_1step_3p/:master_dynamic cell
+# (n_training=750 of n_samples=800); clamped to leave at least one sample
+# on each side of the split so a small smoke-test n_samples doesn't
+# produce an empty train or test set.
+function train_NN(inputs, outputs; train_fraction::Real=0.9375, kwargs...)
+    X = permutedims(reduce(hcat, inputs))
+    Y = permutedims(reduce(hcat, collect.(outputs)))
+    n_training = clamp(round(Int, train_fraction * size(X, 1)), 1, size(X, 1) - 1)
+    return train_and_test_NN(X, Y, n_training; kwargs...)
+end
+
+# predict_drive_parameters builds the one problem-specific piece
+# NNQuantum.jl's predict_and_score needs but can't supply itself: the
+# target state's own input-feature vector (decom_basis expectation values,
+# concatenated with [0,0] for the two infidelities a state has with
+# itself — matches Chu_DFL_execution.ipynb's target_input_1step exactly,
+# and the row layout FL_1step_3p_NN_inputs builds for every other sample),
+# and a `simulate` closure over FLstep_dynamics_3p/t0/initial_state that
+# turns a predicted (τ_exc,ωd,τ_SWAP) into the state it actually reaches.
+# `nn` is train_NN's own return value (a NamedTuple: model + the four
+# normalization stats) — passed straight through, not re-derived.
+function predict_drive_parameters(nn, t0, initial_state, target_final, decom_basis)
+    x_target = vcat([real(expect(matrix, target_final)) for matrix in decom_basis], 0.0, 0.0)
+
+    simulate = predicted_output -> begin
+        τ_exc, ωd, τ_SWAP = predicted_output
+        _, states = FLstep_dynamics_3p(t0, initial_state, τ_exc, ωd, τ_SWAP)
+        states[end]
+    end
+
+    return predict_and_score(nn.model, x_target, nn.maxs_input, nn.mins_input,
+                              nn.maxs_output, nn.mins_output, simulate, target_final)
 end
