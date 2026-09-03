@@ -60,6 +60,11 @@ function rand_hermitian_orthonormal_basis(d::Int, basis)
     end
 
     Q, _ = qr(vecs)
+    Q = Matrix(Q)   # materialize once: Q from qr() is a lazy AbstractQ
+                     # (Householder-reflector representation) — indexing it
+                     # n times below, as old_version's own loop did, would
+                     # re-derive each requested column from the reflectors
+                     # on every access instead of reading a plain array
 
     half = d * d
     ops = Matrix{ComplexF64}[]
@@ -71,6 +76,59 @@ function rand_hermitian_orthonormal_basis(d::Int, basis)
     end
 
     return [Operator(basis, H) for H in ops]
+end
+
+# --- Operator-basis persistence (JLD2) ------------------------------------------
+#
+# rand_hermitian_orthonormal_basis is unseeded — every call produces a
+# genuinely different basis. That's harmless when it's built once and reused
+# for everything within a single run, but breaks any later attempt to reuse
+# a dataset or a trained NN *across* separate runs: both are only meaningful
+# relative to the exact basis their feature vectors were built against, and
+# without this, a reload would silently regenerate a different one instead
+# of erroring — a real bug caught this way in run_Fock_ladder's own
+# dataset/NN reuse feature (DESIGN.md). Same "reconstructible spec, not the
+# raw struct" convention as save_dataset/save_nn: stores each operator's
+# plain matrix data, not the `Operator` struct itself, and rebuilds against
+# whatever basis the caller supplies at load time (its own `cs.basis`, not
+# re-derived from the file).
+const BASIS_FORMAT_VERSION = 1
+
+"""
+    save_operator_basis(path, ops; description="", params=Dict{Symbol,Any}())
+
+Save a vector of operators (e.g. `rand_hermitian_orthonormal_basis`'s own
+return value) to `path` (a `.jld2` file).
+"""
+function save_operator_basis(path::AbstractString, ops::AbstractVector;
+                              description::AbstractString="", params::Dict{Symbol,Any}=Dict{Symbol,Any}())
+    jldsave(path;
+        format_version=BASIS_FORMAT_VERSION,
+        data=[Matrix(op.data) for op in ops],
+        description=description, params=params,
+    )
+    nothing
+end
+
+"""
+    load_operator_basis(path, basis; expected_format_version=nothing)
+
+Reload a basis saved by `save_operator_basis`, rebuilding each `Operator`
+against `basis` (the caller's own, e.g. `cs.basis`) — not a basis recovered
+from the file, since none is stored (bases aren't cheaply/robustly
+serializable the way plain matrix data is, and the caller already has the
+right one in hand). `expected_format_version`, if given, is checked the same
+way `load_dataset`'s/`load_nn`'s own checks work.
+"""
+function load_operator_basis(path::AbstractString, basis; expected_format_version::Union{Nothing,Integer}=nothing)
+    data, format_version = jldopen(path, "r") do file
+        file["data"], file["format_version"]
+    end
+    if expected_format_version !== nothing && format_version != expected_format_version
+        throw(ArgumentError(
+            "load_operator_basis: $path has format_version=$format_version, expected $expected_format_version"))
+    end
+    return [Operator(basis, d) for d in data]
 end
 
 # Ported unchanged from old_version/ML_QM_library.jl:294-303 (needs Julia's
@@ -85,6 +143,27 @@ function threeD_parameter_space(p, parameters_range, dim_parameters_space)
     prob = vec([p(x, y, z) for (x, y, z) in parameters_space])
 
     return parameters_space, prob
+end
+
+# Direct continuous sampling of n_samples (x,y,z) triples uniformly within
+# parameters_range's box (log-uniform in the third dimension — the same axis
+# threeD_parameter_space itself log-spaces via Base.logrange), in O(n_samples)
+# rather than threeD_parameter_space+weighted_sample's O(∏dim_parameters_space)
+# dense-grid-then-weighted-draw. Only equivalent to that pair when the desired
+# sampling probability really is uniform over the box, as every current
+# caller's own `p` happens to be (e.g. FockLadder_problem.jl's `prs`, always
+# `1/prod(dim_parameters_space)` — constant, independent of the point) — for a
+# genuinely non-uniform p, threeD_parameter_space/weighted_sample is still the
+# right tool; this function takes no probability function at all, deliberately,
+# since one isn't needed under uniform sampling.
+function uniform_parameter_sample(parameters_range, n_samples)
+    lo1, hi1 = parameters_range[1]
+    lo2, hi2 = parameters_range[2]
+    lo3, hi3 = parameters_range[3]
+    return [(lo1 + rand() * (hi1 - lo1),
+             lo2 + rand() * (hi2 - lo2),
+             lo3 * (hi3 / lo3)^rand())
+            for _ in 1:n_samples]
 end
 
 # =============================================================================
@@ -396,6 +475,16 @@ end
 # place. `hidden`/`η` are simply ignored when a model/opt_state pair is
 # supplied. Must be given together, not one without the other (an
 # `opt_state` is only valid for the exact model it was built from).
+#
+# Also returns dim_input/dim_output/hidden/η/opt_state alongside the fields
+# documented above — not needed by predict_and_score (which only reads
+# model/the four normalization stats), but needed so the same bundle this
+# function returns can be handed directly to save_nn (below) regardless of
+# whether it came from a fresh train_and_test_NN call or from load_nn
+# (which returns the same field set): save_nn needs dim_input/dim_output/
+# hidden to rebuild an identical model skeleton on reload, and a caller
+# chaining train_and_test_NN calls across a session (not through disk) can
+# reuse opt_state directly.
 function train_and_test_NN(X::AbstractMatrix, Y::AbstractMatrix, n_training::Int;
                             hidden::Int=500, η::Real=1e-4, epochs::Int=350,
                             loss::Union{Function,Symbol}=:mse, batch_size::Int=32,
@@ -408,16 +497,17 @@ function train_and_test_NN(X::AbstractMatrix, Y::AbstractMatrix, n_training::Int
         maxs_input, mins_input, maxs_output, mins_output =
         train_test_dataset_normalization(train_X, train_Y, test_X, test_Y)
 
+    dim_input, dim_output = size(X, 2), size(Y, 2)
     if model === nothing
-        dim_input, dim_output = size(X, 2), size(Y, 2)
         model, opt_state = build_default_model(dim_input, dim_output; hidden=hidden, η=η)
     end
 
     losses = train_model!(model, opt_state, epochs, loss, norm_train_X, norm_train_Y; batch_size=batch_size)
     test_error, test_predictions = test_model(model, loss, norm_test_X, norm_test_Y)
 
-    return (model=model, losses=losses, test_error=test_error, test_predictions=test_predictions,
-            maxs_input=maxs_input, mins_input=mins_input, maxs_output=maxs_output, mins_output=mins_output)
+    return (model=model, opt_state=opt_state, losses=losses, test_error=test_error, test_predictions=test_predictions,
+            maxs_input=maxs_input, mins_input=mins_input, maxs_output=maxs_output, mins_output=mins_output,
+            dim_input=dim_input, dim_output=dim_output, hidden=hidden, η=η)
 end
 
 # --- Prediction orchestration ----------------------------------------------------
@@ -457,4 +547,87 @@ function predict_and_score(model, x, maxs_input, mins_input, maxs_output, mins_o
     final_state = simulate(predicted_output)
     infidelity = qo_infidelity(final_state, target_state)
     return predicted_output, final_state, infidelity
+end
+
+# --- NN persistence (JLD2) -------------------------------------------------------
+#
+# Lets a trained NN (train_and_test_NN's own return bundle) be reloaded in a
+# later run — for run_Fock_ladder's :continue_training / :fixed NN modes,
+# added when generalizing it to accept dataset/NN reuse rather than always
+# generating+training fresh each step. Follows the same "store the
+# reconstructible spec, not the raw derived object" convention save_dataset
+# and QuantumDynamics/framework's own io.jl already use: dim_input/
+# dim_output/hidden (to rebuild an architecturally-identical Chain skeleton
+# via build_default_model on load) plus Flux.state(model) — Flux's own
+# documented portable model-serialization format, robust to internal
+# Flux/Zygote struct changes across versions the way saving the raw model
+# struct directly wouldn't be — and the four normalization stats a
+# prediction made from this NN must be denormalized with (they have to
+# travel with the model: a caller reloading a :fixed NN has no dataset of
+# its own to refit them from, and reusing the wrong stats would silently
+# corrupt every prediction, not error).
+#
+# Deliberately NOT persisted: optimizer state. Flux.state/loadmodel! is
+# documented and portable for models; there's no equivalent documented
+# convention for round-tripping an Optimisers.jl state tree through disk,
+# and faithfully doing so (matching Adam's momentum/variance estimates
+# exactly) isn't needed for what :continue_training actually asks for —
+# resuming training from the saved weights. load_nn below builds a fresh
+# opt_state via Flux.setup after loading the model, the same way starting
+# any fine-tuning run from pretrained weights ordinarily does.
+const NN_FORMAT_VERSION = 1
+
+"""
+    save_nn(path, nn; description="", params=Dict{Symbol,Any}())
+
+Save a trained-NN bundle (`train_and_test_NN`'s own return value, or a
+bundle previously returned by `load_nn`) to `path` (a `.jld2` file).
+"""
+function save_nn(path::AbstractString, nn; description::AbstractString="",
+                  params::Dict{Symbol,Any}=Dict{Symbol,Any}())
+    jldsave(path;
+        format_version=NN_FORMAT_VERSION,
+        dim_input=nn.dim_input, dim_output=nn.dim_output,
+        hidden=nn.hidden, η=nn.η,
+        model_state=Flux.state(nn.model),
+        maxs_input=nn.maxs_input, mins_input=nn.mins_input,
+        maxs_output=nn.maxs_output, mins_output=nn.mins_output,
+        description=description, params=params,
+    )
+    nothing
+end
+
+"""
+    load_nn(path; expected_format_version=nothing)
+
+Reload a bundle saved by `save_nn`, shaped identically to
+`train_and_test_NN`'s own return value (`model`, `opt_state`, the four
+normalization stats, `dim_input`/`dim_output`/`hidden`/`η`) so it can be used
+directly as `predict_and_score`'s/`predict_drive_parameters`'s `nn` argument
+(no further training needed — `:fixed` mode), or passed straight through as
+`train_and_test_NN`'s `model=`/`opt_state=` keywords to resume training
+(`:continue_training` mode). `opt_state` is freshly built (`Flux.setup`), not
+restored — see this section's header note for why. `expected_format_version`,
+if given, is checked the same way `load_dataset`'s own check works.
+"""
+function load_nn(path::AbstractString; expected_format_version::Union{Nothing,Integer}=nothing)
+    dim_input, dim_output, hidden, η, model_state,
+        maxs_input, mins_input, maxs_output, mins_output, format_version =
+        jldopen(path, "r") do file
+            file["dim_input"], file["dim_output"], file["hidden"], file["η"], file["model_state"],
+            file["maxs_input"], file["mins_input"], file["maxs_output"], file["mins_output"],
+            file["format_version"]
+        end
+    if expected_format_version !== nothing && format_version != expected_format_version
+        throw(ArgumentError(
+            "load_nn: $path has format_version=$format_version, expected $expected_format_version"))
+    end
+
+    model, opt_state = build_default_model(dim_input, dim_output; hidden=hidden, η=η)
+    Flux.loadmodel!(model, model_state)
+
+    return (model=model, opt_state=opt_state,
+            maxs_input=maxs_input, mins_input=mins_input,
+            maxs_output=maxs_output, mins_output=mins_output,
+            dim_input=dim_input, dim_output=dim_output, hidden=hidden, η=η)
 end

@@ -144,7 +144,7 @@ prs(τ_exc, ωd, τ_SWAP) = 1 / prod(dim_parameters_space)   # uniform, matches 
 
 n_samples_dataset = 5
 
-outputs_dataset = FL_1step_3p_NN_outputs(prs, parameters_range, dim_parameters_space, n_samples_dataset)
+outputs_dataset = FL_1step_3p_NN_outputs(prs, parameters_range, dim_parameters_space, n_samples_dataset; uniform=true)
 println("Sampled (τ_exc, ωd, τ_SWAP) triples: ", outputs_dataset)
 
 inputs_dataset = FL_1step_3p_NN_inputs(t0, initial_state, target_spinflip, target_final, decom_basis, outputs_dataset, n_samples_dataset)

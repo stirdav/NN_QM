@@ -55,10 +55,69 @@ osc_basis   = getsubsystem(cs, :osc).basis
 # built once, before the loop, and reused every step — same as that cell's
 # own SUN_basis.
 
+# A step's dataset_mode/nn_mode (and their companion path arguments) may be
+# given once (applies to every step) or as a Vector with one entry per step
+# — _per_step resolves either shape the same way; _check_per_step_length
+# fails loudly and early (before any simulation runs) on a length mismatch,
+# rather than an obscure BoundsError mid-loop.
+_per_step(x, step) = x isa AbstractVector ? x[step] : x
+
+function _check_per_step_length(x, N_steps, name)
+    if x isa AbstractVector && length(x) != N_steps
+        throw(ArgumentError("run_Fock_ladder: $name has length $(length(x)), expected $N_steps (one entry per step)"))
+    end
+end
+
+# File names for one basis_id: every file that belongs together (the basis
+# itself, and every dataset/NN made using it) ends in "_b<basis_id>", so the
+# number in the name is what tells you which basis a file goes with — see
+# generate_decom_basis's own docstring below for why this replaced silently
+# making a new basis inside run_Fock_ladder.
+_decom_basis_path(basis_id, save_dir) = joinpath(save_dir, "decom_basis_b$(basis_id).jld2")
+_dataset_path(basis_id, step, save_dir) = joinpath(save_dir, "dataset_step$(step)_b$(basis_id).jld2")
+_nn_path(basis_id, step, save_dir) = joinpath(save_dir, "nn_step$(step)_b$(basis_id).jld2")
+
 """
-    run_Fock_ladder(N_steps; n_samples=800, dim_parameters_space=[100,100,100],
+    generate_decom_basis(basis_id::Integer; save_dir=@__DIR__, overwrite=false)
+
+Make a new, random decomposition basis and save it to
+`save_dir/decom_basis_b<basis_id>.jld2`. This is its own separate step — call
+it once, by hand, whenever you actually want a new basis. Then reuse the same
+`basis_id` in `run_Fock_ladder` calls (even in a later Julia session) until
+you decide to make a different one.
+
+Why this is separate from `run_Fock_ladder` now: a dataset or a trained NN
+only makes sense together with the *exact* basis it was built from. An
+earlier version of this feature made a new basis automatically inside
+`run_Fock_ladder`, and that caused a real bug (`DESIGN.md` Part 8) — a
+dataset or NN saved under one basis got paired with a different one when
+reloaded later, giving wrong predictions with no error at all. Making the
+basis its own explicit, named, saved step removes that risk: `run_Fock_ladder`
+now always loads a basis, never makes one.
+
+Refuses to overwrite an existing file for the same `basis_id` unless
+`overwrite=true` — there may already be datasets/NNs saved against it, and
+replacing it quietly would break that pairing.
+"""
+function generate_decom_basis(basis_id::Integer; save_dir::AbstractString=@__DIR__, overwrite::Bool=false)
+    path = _decom_basis_path(basis_id, save_dir)
+    isfile(path) && !overwrite && throw(ArgumentError(
+        "generate_decom_basis: $path already exists — pass overwrite=true to replace it " *
+        "(any dataset/NN already saved with basis_id=$(basis_id) would then no longer match it)"))
+
+    d = length(cs.basis)
+    basis_ops = rand_hermitian_orthonormal_basis(d, cs.basis)
+    save_operator_basis(path, basis_ops; description="FL_1step_3p decomposition basis b$(basis_id)")
+    println("Generated and saved decomposition basis b$(basis_id) to $(path)")
+    return path
+end
+
+"""
+    run_Fock_ladder(N_steps, basis_id; n_samples=800, dim_parameters_space=[100,100,100],
                     save_dir=@__DIR__, train_fraction=0.9375, hidden=500, η=1e-4,
-                    epochs=350, loss=:mse, batch_size=32)
+                    epochs=350, loss=:mse, batch_size=32, uniform=true,
+                    dataset_mode=:generate_and_save, dataset_paths=nothing,
+                    nn_mode=:train_new, nn_paths=nothing, save_nn_dir=save_dir)
 
 Drive the Fock ladder up `N_steps` rungs following the user's train/predict/
 reiterate algorithm (see CLAUDE.md's Plan, step 3), not `old_version`'s
@@ -95,8 +154,61 @@ step's *target* state and nominal pulse timing (assuming the ladder climbs
 perfectly) was removed, not fixed, once this real prediction existed to
 replace it, per the restructure documented further up this file's own
 history in `DESIGN.md`.
+
+`uniform` (default `true`) controls how step 1's `(τ_exc,ωd,τ_SWAP)` triples
+are drawn: this function's own sampling weight, `prs`, is a hardcoded
+constant (`1/prod(dim_parameters_space)`, independent of the point) — there
+is no live path here where the sampling is actually non-uniform — so the
+default skips `FL_1step_3p_NN_outputs`'s dense-grid-then-weighted-draw
+entirely in favor of direct continuous sampling (`NNQuantum.jl`'s
+`uniform_parameter_sample`), which is both cheaper (`O(n_samples)` instead of
+`O(∏dim_parameters_space)`) and finer-grained (continuous, not quantized to
+`dim_parameters_space`'s resolution). `dim_parameters_space` stays a real,
+effective keyword when `uniform=false` is passed explicitly, reverting to the
+original grid-based sampling.
+
+**`basis_id` — always a loaded basis, never a made-up one.** `decom_basis`
+(the random set of operators every feature vector, training or prediction, is
+built from) is no longer made inside `run_Fock_ladder` at all — it is always
+loaded from `save_dir/decom_basis_b<basis_id>.jld2`, made ahead of time by
+calling `generate_decom_basis(basis_id)` once. If that file doesn't exist,
+`run_Fock_ladder` stops with a clear error telling you to call
+`generate_decom_basis` first, instead of silently making a new one. See
+`generate_decom_basis`'s own docstring for why this is a separate step now —
+a dataset or NN only means what it means together with the exact basis it
+was built from, and a real bug came from making a fresh, unsaved basis
+automatically on every call (`DESIGN.md` Part 8).
+
+Every file this run saves gets `basis_id` at the end of its name, so the
+number itself shows which basis it goes with: `decom_basis_b<id>.jld2`
+(made once, by `generate_decom_basis`), `dataset_step<n>_b<id>.jld2`,
+`nn_step<n>_b<id>.jld2`.
+
+**Dataset/NN reuse** (`DESIGN.md`'s later addition — generate/train fresh
+every step was the only option before this): `dataset_mode` and `nn_mode`
+are independent per-step controls, each either a single `Symbol` (applies to
+every step) or a `Vector{Symbol}` (one per step, checked against `N_steps`).
+
+- `dataset_mode ∈ (:generate_and_save, :generate_only, :load)` — the default
+  generates and saves (as before, now named `dataset_step<n>_b<id>.jld2`);
+  `:generate_only` skips the save; `:load` skips generation entirely and
+  reads that same file name back in (via `load_dataset`) instead —
+  `dataset_paths[step]`/`dataset_paths` can be given to load from a
+  different file instead, but usually isn't needed.
+- `nn_mode ∈ (:train_new, :continue_training, :fixed)` — the default trains
+  a fresh model each step; `:continue_training` loads that step's saved
+  checkpoint (`nn_step<n>_b<id>.jld2`, or `nn_paths[step]`/`nn_paths` if
+  given) and resumes training on the current step's dataset; `:fixed` loads
+  it and uses it directly for prediction, with **no training and no dataset
+  step at all** — nothing would consume a generated dataset in that case,
+  so it's skipped rather than generated and discarded.
+- `save_nn_dir` (defaults to `save_dir`) is where each step's resulting NN
+  is saved whenever training actually happens
+  (`:train_new`/`:continue_training`) — this is what supplies the
+  checkpoints `:continue_training`/`:fixed` load in a later step or a later
+  run. Pass `nothing` to skip saving.
 """
-function run_Fock_ladder(N_steps::Integer;
+function run_Fock_ladder(N_steps::Integer, basis_id::Integer;
                                     n_samples::Integer=800,
                                     dim_parameters_space::Vector{<:Integer}=[100, 100, 100],
                                     save_dir::AbstractString=@__DIR__,
@@ -105,9 +217,27 @@ function run_Fock_ladder(N_steps::Integer;
                                     η::Real=1e-4,
                                     epochs::Integer=350,
                                     loss::Union{Function,Symbol}=:mse,
-                                    batch_size::Integer=32)
-    d_dataset = length(cs.basis)
-    decom_basis = rand_hermitian_orthonormal_basis(d_dataset, cs.basis)
+                                    batch_size::Integer=32,
+                                    uniform::Bool=true,
+                                    dataset_mode::Union{Symbol,AbstractVector{Symbol}}=:generate_and_save,
+                                    dataset_paths::Union{Nothing,AbstractString,AbstractVector}=nothing,
+                                    nn_mode::Union{Symbol,AbstractVector{Symbol}}=:train_new,
+                                    nn_paths::Union{Nothing,AbstractString,AbstractVector}=nothing,
+                                    save_nn_dir::Union{Nothing,AbstractString}=save_dir)
+    _check_per_step_length(dataset_mode, N_steps, "dataset_mode")
+    _check_per_step_length(dataset_paths, N_steps, "dataset_paths")
+    _check_per_step_length(nn_mode, N_steps, "nn_mode")
+    _check_per_step_length(nn_paths, N_steps, "nn_paths")
+
+    # decom_basis is always loaded, never made here — see generate_decom_basis's
+    # own docstring for why. Every feature vector below (training or
+    # prediction) is only meaningful together with this exact basis, so a
+    # missing file is a loud, upfront error, not a silent fresh basis.
+    basis_path = _decom_basis_path(basis_id, save_dir)
+    isfile(basis_path) || throw(ArgumentError(
+        "run_Fock_ladder: no saved basis at $basis_path — call " *
+        "generate_decom_basis($basis_id; save_dir=\"$save_dir\") first"))
+    decom_basis = load_operator_basis(basis_path, cs.basis)
 
     prs(τ_exc, ωd, τ_SWAP) = 1 / prod(dim_parameters_space)
 
@@ -120,38 +250,81 @@ function run_Fock_ladder(N_steps::Integer;
         target_spinflip = spinup(qubit_basis) ⊗ fockstate(osc_basis, step - 1)
         target_final    = spindown(qubit_basis) ⊗ fockstate(osc_basis, step)
 
-        # --- Parameter ranges for this step ---
-        T_exc_ini, T_exc_fin = 1e-5, 5e-2
+        step_nn_mode = _per_step(nn_mode, step)
 
-        δ_ωd = 100.0
-        ωd_ini, ωd_fin = Δ0 - δ_ωd, Δ0 + δ_ωd
+        if step_nn_mode == :fixed
+            # --- :fixed — no dataset, no training, just load and predict ---
+            # (loading always looks under save_dir, the one directory that's
+            # never nothing — save_nn_dir only controls where *new* checkpoints
+            # get written, a separate, optional concern, below)
+            nn_path = something(_per_step(nn_paths, step), _nn_path(basis_id, step, save_dir))
+            nn = load_nn(nn_path)
+            println("step $(step)/$(N_steps): loaded fixed NN from $(nn_path), no dataset/training")
 
-        t_swap_th = π / (2 * g * sqrt(step))
-        δ1, δ2 = 0.0005, 0.00015
-        τ_SWAP_ini, τ_SWAP_fin = t_swap_th - δ1, t_swap_th + δ2
+        elseif step_nn_mode ∈ (:train_new, :continue_training)
+            # --- Parameter ranges for this step ---
+            T_exc_ini, T_exc_fin = 1e-5, 5e-2
 
-        parameters_range = [[T_exc_ini, T_exc_fin], [ωd_ini, ωd_fin], [τ_SWAP_ini, τ_SWAP_fin]]
+            δ_ωd = 100.0
+            ωd_ini, ωd_fin = Δ0 - δ_ωd, Δ0 + δ_ωd
 
-        # --- 1. Generate a dataset from the current initial_state, over a spectrum of drive values ---
-        outputs = FL_1step_3p_NN_outputs(prs, parameters_range, dim_parameters_space, n_samples)
-        inputs  = FL_1step_3p_NN_inputs(t0, initial_state, target_spinflip, target_final, decom_basis, outputs, n_samples)
+            t_swap_th = π / (2 * g * sqrt(step))
+            δ1, δ2 = 0.0005, 0.00015
+            τ_SWAP_ini, τ_SWAP_fin = t_swap_th - δ1, t_swap_th + δ2
 
-        save_dataset(joinpath(save_dir, "dataset_step$(step).jld2"), inputs, outputs;
-            description="FL_1step_3p ladder step $(step) dataset (N_steps=$(N_steps))",
-            params=Dict{Symbol,Any}(:step=>step, :n_samples=>n_samples, :N_mech=>N_mech, :g=>g, :t0=>t0))
+            parameters_range = [[T_exc_ini, T_exc_fin], [ωd_ini, ωd_fin], [τ_SWAP_ini, τ_SWAP_fin]]
 
-        println("step $(step)/$(N_steps): saved $(n_samples)-sample dataset to dataset_step$(step).jld2")
+            # --- 1. Dataset: generate (+ optionally save), or load a previous one ---
+            step_dataset_mode = _per_step(dataset_mode, step)
+            if step_dataset_mode == :load
+                dataset_path = something(_per_step(dataset_paths, step), _dataset_path(basis_id, step, save_dir))
+                X, Y = load_dataset(dataset_path)
+                println("step $(step)/$(N_steps): loaded dataset from $(dataset_path)")
+            elseif step_dataset_mode ∈ (:generate_and_save, :generate_only)
+                outputs = FL_1step_3p_NN_outputs(prs, parameters_range, dim_parameters_space, n_samples; uniform=uniform)
+                inputs  = FL_1step_3p_NN_inputs(t0, initial_state, target_spinflip, target_final, decom_basis, outputs, n_samples)
+                X, Y = inputs, outputs
 
-        # --- 2. Train a NN on (inputs, outputs) ---
-        nn = train_NN(inputs, outputs; train_fraction=train_fraction, hidden=hidden, η=η,
-                      epochs=epochs, loss=loss, batch_size=batch_size)
+                if step_dataset_mode == :generate_and_save
+                    save_path = _dataset_path(basis_id, step, save_dir)
+                    save_dataset(save_path, inputs, outputs;
+                        description="FL_1step_3p ladder step $(step) dataset (N_steps=$(N_steps), basis_id=$(basis_id))",
+                        params=Dict{Symbol,Any}(:step=>step, :basis_id=>basis_id, :n_samples=>n_samples,
+                                                 :N_mech=>N_mech, :g=>g, :t0=>t0))
+                    println("step $(step)/$(N_steps): saved $(n_samples)-sample dataset to $(save_path)")
+                else
+                    println("step $(step)/$(N_steps): generated $(n_samples)-sample dataset (not saved)")
+                end
+            else
+                throw(ArgumentError("run_Fock_ladder: unknown dataset_mode $(step_dataset_mode) at step $(step)"))
+            end
+
+            # --- 2. Train — fresh, or continuing from a loaded checkpoint ---
+            if step_nn_mode == :continue_training
+                nn_path = something(_per_step(nn_paths, step), _nn_path(basis_id, step, save_dir))
+                loaded = load_nn(nn_path)
+                nn = train_NN(X, Y; train_fraction=train_fraction, hidden=hidden, η=η, epochs=epochs,
+                              loss=loss, batch_size=batch_size, model=loaded.model, opt_state=loaded.opt_state)
+            else
+                nn = train_NN(X, Y; train_fraction=train_fraction, hidden=hidden, η=η,
+                              epochs=epochs, loss=loss, batch_size=batch_size)
+            end
+
+            if save_nn_dir !== nothing
+                save_path = _nn_path(basis_id, step, save_nn_dir)
+                save_nn(save_path, nn; description="FL_1step_3p ladder step $(step) trained NN (basis_id=$(basis_id))",
+                        params=Dict{Symbol,Any}(:step=>step, :basis_id=>basis_id, :N_mech=>N_mech, :g=>g))
+                println("step $(step)/$(N_steps): saved trained NN to $(save_path) (test error = $(nn.test_error))")
+            end
+        else
+            throw(ArgumentError("run_Fock_ladder: unknown nn_mode $(step_nn_mode) at step $(step)"))
+        end
 
         # --- 3. Predict the drive parameters that reach target_final ---
         predicted_output, predicted_state, prediction_infidelity =
             predict_drive_parameters(nn, t0, initial_state, target_final, decom_basis)
 
-        println("step $(step)/$(N_steps): test error = $(nn.test_error), " *
-                "predicted (τ_exc,ωd,τ_SWAP) = $(predicted_output), infidelity = $(prediction_infidelity)")
+        println("step $(step)/$(N_steps): predicted (τ_exc,ωd,τ_SWAP) = $(predicted_output), infidelity = $(prediction_infidelity)")
 
         # --- 4. Reiterate with the state the predicted parameters actually reach ---
         τ_exc_pred, ωd_pred, τ_SWAP_pred = predicted_output
@@ -165,7 +338,9 @@ end
 # Not called on include — dataset generation at realistic n_samples takes
 # real time (minutes, at old_version's own n_samples=800/dim_parameters_
 # space=[100,100,100], per step). Run explicitly, e.g. from the REPL after
-# including this file:
+# including this file. A basis has to exist first (generate_decom_basis
+# only needs doing once — reuse the same basis_id afterward):
 #
-#   run_Fock_ladder(6)                      # old_version's own N_steps, full-size
-#   run_Fock_ladder(3; n_samples=20)         # a cheaper multi-step check
+#   generate_decom_basis(1)                 # makes decom_basis_b1.jld2
+#   run_Fock_ladder(6, 1)                    # old_version's own N_steps, full-size
+#   run_Fock_ladder(3, 1; n_samples=20)      # a cheaper multi-step check

@@ -221,7 +221,19 @@ end
 # (HBAR-qubit_problem.jl:325-329): weighted-samples n_samples
 # (τ_exc, ωd, τ_SWAP) triples from a 3D grid over parameters_range,
 # weighted by the caller-supplied probability function p(τ_exc, ωd, τ_SWAP).
-function FL_1step_3p_NN_outputs(p, parameters_range, dim_parameters_space, n_samples)
+#
+# `uniform=true` bypasses the grid entirely, via NNQuantum.jl's
+# `uniform_parameter_sample` — O(n_samples) instead of the grid-based path's
+# O(∏dim_parameters_space), and continuous instead of quantized to
+# dim_parameters_space's resolution. Only equivalent to the default path when
+# `p` really is uniform over the box; every caller in this project (`prs` in
+# both `run_Fock_ladder` and `test.jl`'s dataset-generation smoke test) is,
+# so both pass `uniform=true`. Default stays `false` so this function's own
+# behavior for any other caller/`p` is unchanged.
+function FL_1step_3p_NN_outputs(p, parameters_range, dim_parameters_space, n_samples; uniform::Bool=false)
+    if uniform
+        return uniform_parameter_sample(parameters_range, n_samples)
+    end
     parameters_space, prob = threeD_parameter_space(p, parameters_range, dim_parameters_space)
     return weighted_sample(parameters_space, prob, n_samples)
 end
@@ -343,16 +355,29 @@ end
 # out of threeD_parameter_space's tuple grid, not vectors) — into the
 # plain Float64 matrices NNQuantum.jl's train_and_test_NN expects (hence
 # `collect.(outputs)` below, turning each tuple into a vector `reduce(hcat,
-# ...)` can stack), then delegates entirely. train_fraction=0.9375 matches
-# Chu_DFL_execution.ipynb's own :FL_1step_3p/:master_dynamic cell
-# (n_training=750 of n_samples=800); clamped to leave at least one sample
-# on each side of the split so a small smoke-test n_samples doesn't
-# produce an empty train or test set.
-function train_NN(inputs, outputs; train_fraction::Real=0.9375, kwargs...)
-    X = permutedims(reduce(hcat, inputs))
-    Y = permutedims(reduce(hcat, collect.(outputs)))
+# ...)` can stack), then delegates to the matrix method below.
+#
+# A second method, taking X/Y as plain matrices directly, was added
+# alongside run_Fock_ladder's dataset_mode option (DESIGN.md): a dataset
+# loaded from disk via NNQuantum.jl's load_dataset already comes back as
+# plain Float64 matrices, not FL_1step_3p_NN_outputs/_inputs's own
+# vector-of-vector/vector-of-tuple shapes — this lets run_Fock_ladder call
+# `train_NN` the same way regardless of whether the dataset was just
+# generated or loaded from a previous run's saved file, via ordinary Julia
+# multiple dispatch rather than a runtime branch inside one method.
+# train_fraction=0.9375 matches Chu_DFL_execution.ipynb's own
+# :FL_1step_3p/:master_dynamic cell (n_training=750 of n_samples=800);
+# clamped to leave at least one sample on each side of the split so a small
+# smoke-test n_samples doesn't produce an empty train or test set.
+function train_NN(X::AbstractMatrix, Y::AbstractMatrix; train_fraction::Real=0.9375, kwargs...)
     n_training = clamp(round(Int, train_fraction * size(X, 1)), 1, size(X, 1) - 1)
     return train_and_test_NN(X, Y, n_training; kwargs...)
+end
+
+function train_NN(inputs::AbstractVector, outputs::AbstractVector; kwargs...)
+    X = permutedims(reduce(hcat, inputs))
+    Y = permutedims(reduce(hcat, collect.(outputs)))
+    return train_NN(X, Y; kwargs...)
 end
 
 # predict_drive_parameters builds the one problem-specific piece
