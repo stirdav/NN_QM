@@ -26,6 +26,7 @@ using Statistics      # mean — relative_mse/mape
 using Random          # shuffle — train_model!'s per-epoch minibatching
 using JLD2            # jldopen — load_dataset
 using Flux            # withgradient/Optimisers.update!/Losses — train_model!
+using CairoMakie      # Figure/Axis/lines!/save — plot_trajectory
 
 # Mixed-state infidelity, 1 - min(fidelity,1) — ported from old_version/
 # ML_QM_library.jl:203-213, but collapsed from two separate Ket/Operator
@@ -630,4 +631,126 @@ function load_nn(path::AbstractString; expected_format_version::Union{Nothing,In
             maxs_input=maxs_input, mins_input=mins_input,
             maxs_output=maxs_output, mins_output=mins_output,
             dim_input=dim_input, dim_output=dim_output, hidden=hidden, η=η)
+end
+
+# --- Prediction persistence (JLD2) ------------------------------------------
+#
+# Added while setting up (v)'s staged validation: nothing previously saved a
+# predicted output (predict_and_score's own `predicted_output`) to disk — a
+# real gap once "was the prediction any good" needs checking later, not just
+# printed once and lost. `predicted_output` is a plain vector (e.g. an
+# FL_1step_3p (τ_exc,ωd,τ_SWAP) triple, or any other problem's own predicted
+# parameters) — nothing here references what it means, same "plain data in"
+# boundary every other NNQuantum.jl function holds. Same "reconstructible
+# spec, not a raw struct" shape as save_operator_basis/save_nn: `params` is
+# the free-form place a caller records what the prediction belongs to (step,
+# basis_id, t0, ...).
+const PREDICTION_FORMAT_VERSION = 1
+
+"""
+    save_prediction(path, predicted_output, infidelity; description="", params=Dict{Symbol,Any}())
+
+Save one predicted-output vector (e.g. `predict_and_score`'s own
+`predicted_output`) together with the infidelity it scored, to `path` (a
+`.jld2` file).
+"""
+function save_prediction(path::AbstractString, predicted_output, infidelity::Real;
+                          description::AbstractString="", params::Dict{Symbol,Any}=Dict{Symbol,Any}())
+    jldsave(path;
+        format_version=PREDICTION_FORMAT_VERSION,
+        predicted_output=collect(predicted_output),
+        infidelity=Float64(infidelity),
+        description=description, params=params,
+    )
+    nothing
+end
+
+"""
+    load_prediction(path; expected_format_version=nothing)
+
+Reload a prediction saved by `save_prediction`. Returns `(predicted_output,
+infidelity)`. `expected_format_version` works the same way as in
+`load_dataset`/`load_nn`/`load_operator_basis`.
+"""
+function load_prediction(path::AbstractString; expected_format_version::Union{Nothing,Integer}=nothing)
+    predicted_output, infidelity, format_version = jldopen(path, "r") do file
+        file["predicted_output"], file["infidelity"], file["format_version"]
+    end
+    if expected_format_version !== nothing && format_version != expected_format_version
+        throw(ArgumentError(
+            "load_prediction: $path has format_version=$format_version, expected $expected_format_version"))
+    end
+    return predicted_output, infidelity
+end
+
+# --- Trajectory plotting ----------------------------------------------------
+#
+# Approaching step 2's (v) staged validation raised a real need this project
+# didn't have a reusable answer for yet: inspecting a predicted trajectory —
+# whether the ladder's climb, per rung, is actually landing where it should —
+# by eye, for whichever observables the caller cares about. test.jl's own
+# section 3 already plots ⟨n_qubit⟩/⟨n_osc⟩ this way, but as one-off,
+# hardcoded CairoMakie code, not a function anyone else (e.g. a future
+# per-step validation over run_Fock_ladder's own predicted parameters) can
+# call. This is that function, generalized to any observable(s) the caller
+# names.
+#
+# `states` need not come from FLstep_dynamics_3p directly — that function's
+# own (tspan, states) is only 3 points (each stage's evolve call is passed a
+# bare 2-point tspan, per (g)'s own status note), too coarse to plot a curve
+# from. FockLadder_problem.jl's FLstep_dynamics_3p_dense (promoted from this
+# same test.jl section, see its own docstring) is what supplies a densely-
+# sampled trajectory instead — this function only ever consumes whatever
+# (tspan, states) pair it's handed, dense or not, and never names
+# FLstep_dynamics_3p (or FLstep_dynamics_3p_dense) itself, keeping the same
+# "plain data in, no problem-specific names" boundary every other function in
+# this file already holds.
+#
+# `observables` is a Vector of `label => operator` pairs rather than two
+# parallel Vectors (labels, operators) or a Dict (whose iteration order isn't
+# guaranteed, unlike a Vector's) — this lets a caller write
+# `["n_qubit" => op(cs,:qubit,:n), "n_osc" => op(cs,:osc,:n)]` inline, and
+# fixes the plotted (and legend) order to exactly the order given.
+"""
+    plot_trajectory(tspan, states, observables; title="", xlabel="t", ylabel="⟨·⟩",
+                     vlines=Float64[], save_path=nothing)
+
+Plot the expectation value of one or more chosen `observables`, as a function
+of time, along a trajectory (`tspan`, `states`).
+
+- `observables` is a `Vector` of `label => operator` pairs, e.g.
+  `["n_qubit" => op(cs, :qubit, :n), "n_osc" => op(cs, :osc, :n)]`. Each
+  `operator` must act on the same Hilbert space `states` lives in.
+- `vlines` draws optional dashed vertical reference lines (e.g. a stage
+  boundary) at the given time value(s).
+- `save_path`, if given, saves the figure there (e.g. `"trajectory.png"`);
+  the figure is always returned regardless, so a caller can also just
+  display it interactively (`fig` in the REPL) without saving.
+
+Returns `(fig, values)`: the `CairoMakie.Figure`, and a
+`Dict{String,Vector{Float64}}` mapping each observable's label to its
+expectation-value series along `tspan` — so a caller can inspect or reuse the
+raw numbers without re-plotting or recomputing `expect`.
+"""
+function plot_trajectory(tspan, states, observables::AbstractVector{<:Pair};
+                          title::AbstractString="", xlabel::AbstractString="t",
+                          ylabel::AbstractString="⟨·⟩",
+                          vlines::AbstractVector{<:Real}=Float64[],
+                          save_path::Union{Nothing,AbstractString}=nothing)
+    fig = Figure(size=(900, 550))
+    ax = Axis(fig[1, 1], xlabel=xlabel, ylabel=ylabel, title=title)
+
+    values = Dict{String,Vector{Float64}}()
+    for (label, operator) in observables
+        y = real.(expect(operator, states))
+        values[String(label)] = y
+        lines!(ax, tspan, y, label=String(label))
+    end
+
+    isempty(vlines) || CairoMakie.vlines!(ax, collect(vlines), color=(:gray, 0.5), linestyle=:dash)
+    axislegend(ax, position=:rc)
+
+    save_path === nothing || save(save_path, fig)
+
+    return fig, values
 end

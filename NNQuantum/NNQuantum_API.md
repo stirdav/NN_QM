@@ -32,6 +32,7 @@ using Statistics      # mean — used in a couple of loss functions
 using Random          # shuffle — used to mix up the training data each epoch
 using JLD2            # saving/loading files
 using Flux            # the actual neural-network library
+using CairoMakie      # plotting a trajectory
 ```
 
 ## Overview: every function, in one line each
@@ -53,6 +54,8 @@ using Flux            # the actual neural-network library
 | `predict_output` | Feed one input into a trained model and get a real-world (denormalized) answer back. |
 | `predict_and_score` | Predict an answer, use it to run a simulation, and score how close the result got to a target. |
 | `save_nn` / `load_nn` | Save a trained model (and everything needed to use it again) to a file, and load it back later. |
+| `save_prediction` / `load_prediction` | Save a predicted output (and the infidelity it scored) to a file, and load it back later. |
+| `plot_trajectory(tspan, states, observables)` | Plot the expectation value of one or more chosen observables, over time, along a trajectory. |
 
 The rest of this guide goes through each of these in more detail, in the same order they appear in the file.
 
@@ -226,6 +229,43 @@ Loads a bundle saved by `save_nn`, ready to use right away.
 - Returns a bundle shaped exactly like `train_and_test_NN`'s own return value, so you can either:
   - use it directly for prediction (with `predict_and_score`), needing no further training, or
   - pass its `model`/`opt_state` straight into `train_and_test_NN`'s `model=`/`opt_state=` to keep training it.
+
+---
+
+## Saving and loading a prediction
+
+### `save_prediction(path, predicted_output, infidelity; description="", params=Dict())`
+
+Saves a predicted output (e.g. what `predict_and_score`/`predict_output` returned) together with the infidelity it scored, to a `.jld2` file — so you have a record of what was predicted, without having to keep it around in memory or re-derive it later.
+
+### `load_prediction(path; expected_format_version=nothing)`
+
+Loads a prediction saved by `save_prediction`. Returns `(predicted_output, infidelity)`.
+
+---
+
+## Plotting a trajectory
+
+### `plot_trajectory(tspan, states, observables; title="", xlabel="t", ylabel="⟨·⟩", vlines=[], save_path=nothing)`
+
+Plots the expectation value of one or more observables you choose, as a function of time, along a trajectory.
+
+- `tspan`/`states` are a trajectory — a list of time points and the matching list of quantum states at those times. `NNQuantum.jl` doesn't produce these itself (it has no simulation code); in this project they come from `FockLadder_problem.jl`'s `FLstep_dynamics_3p_dense` (a densely-sampled version of the two-stage pulse protocol — the plain `FLstep_dynamics_3p` only returns 3 points, too coarse to plot a curve from).
+- `observables` is a list of `label => operator` pairs, e.g. `["n_qubit" => op(cs,:qubit,:n), "n_osc" => op(cs,:osc,:n)]` — one line is plotted per pair, in the order given, each labeled in the legend by its `label`.
+- `vlines` optionally draws dashed vertical reference lines at given time values (e.g. where one pulse stage ends and the next begins).
+- `save_path`, if given, saves the plot to a file (e.g. `"trajectory.png"`); the figure is returned either way, so you can also just look at it without saving.
+- Returns `(fig, values)`: the plot itself, and a dictionary from each observable's label to its plain list of expectation values along `tspan` — so you can also inspect or reuse the numbers directly, without re-plotting.
+
+Example, using a dense trajectory from `FockLadder_problem.jl`:
+
+```julia
+tspan, states = FLstep_dynamics_3p_dense(t0, initial_state, τ_exc, ωd, τ_SWAP)
+
+fig, values = plot_trajectory(tspan, states,
+    ["n_qubit" => op(cs, :qubit, :n), "n_osc" => op(cs, :osc, :n)];
+    title="predicted trajectory", ylabel="⟨n⟩", vlines=[t0 + τ_exc],
+    save_path="predicted_trajectory.png")
+```
 
 ---
 

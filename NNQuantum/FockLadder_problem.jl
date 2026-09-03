@@ -190,6 +190,57 @@ function FLstep_dynamics_3p(t0, initial_state, τ_exc, ωd, τ_SWAP)
     return vcat(tspan1, tspan2[2:end]), vcat(states1, states2[2:end])
 end
 
+# --- Densely-sampled two-stage trajectory (for plotting) -----------------------
+#
+# FLstep_dynamics_3p's own (tspan, states) is only 3 points — each stage's
+# evolve call above is passed a bare 2-point tspan, correct for what (h)/
+# run_Fock_ladder actually need (endpoints only), but far too coarse to plot
+# a curve against. Promoted here (unchanged) from test.jl's own
+# run_short_dynamics, a test-local helper that mirrored FLstep_dynamics_3p's
+# construction line-for-line just to get plottable resolution — needed as
+# reusable, non-test-local code once approaching step 2's (v) staged
+# validation raised a real need to plot a *predicted* ladder-step trajectory,
+# not just the fixed smoke-test one test.jl itself already covers.
+#
+# Kept as its own function rather than adding an `npoints` keyword to
+# FLstep_dynamics_3p itself: the two functions serve different callers with
+# different needs (h)/run_Fock_ladder want the fast, 3-point endpoints-only
+# path on every dataset sample; a validation/plotting call wants the slower,
+# densely-sampled one, occasionally. Same H0/J/π_pulse_shape, same two-stage
+# spin-flip-then-SWAP hand-off as FLstep_dynamics_3p — only each stage's
+# tspan differs (range(...; length=npoints) instead of a bare (t_start,
+# t_end) tuple).
+"""
+    FLstep_dynamics_3p_dense(t0, initial_state, τ_exc, ωd, τ_SWAP; npoints=200)
+
+Same two-stage protocol as `FLstep_dynamics_3p`, but sampling each stage at
+`npoints` points instead of just its two endpoints — for plotting a
+trajectory (e.g. with `NNQuantum.jl`'s `plot_trajectory`), not for dataset
+generation (`FLstep_dynamics_3p` remains the right, cheaper choice there).
+Returns `(tspan, states)`, the same shape `FLstep_dynamics_3p` returns, just
+with `2*npoints - 1` points instead of 3.
+"""
+function FLstep_dynamics_3p_dense(t0, initial_state, τ_exc, ωd, τ_SWAP; npoints::Integer=200)
+    Ω_R = π / τ_exc
+    Ω(t) = Ω_R * π_pulse_shape(t, t0, τ_exc) * cos(ωd * t)
+    Δ(t) = -Δ0 * π_pulse_shape(t, t0 + τ_exc, τ_SWAP)
+
+    H = add_time_dependence(H0,
+        (t -> Ω(t))   => op(cs, :qubit, :σx),
+        (t -> Δ(t)/2) => op(cs, :qubit, :σz))
+
+    # stage 1: spin-flip
+    tspan1 = range(t0, t0 + τ_exc; length=npoints)
+    _, states1 = evolve(tspan1, initial_state, H, J)
+    ψ_at_flip = states1[end]
+
+    # stage 2: SWAP
+    tspan2 = range(t0 + τ_exc, t0 + τ_exc + τ_SWAP; length=npoints)
+    _, states2 = evolve(tspan2, ψ_at_flip, H, J)
+
+    return vcat(collect(tspan1), collect(tspan2[2:end])), vcat(states1, states2[2:end])
+end
+
 # --- (h) Dataset generation (NN inputs/outputs) -------------------------------
 #
 # NOT part of the (a)-(g) system setup above. Step 3 of NNQuantum's plan
