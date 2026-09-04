@@ -1,0 +1,7 @@
+[deps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+QuantumDynamics = "a43afaa6-349e-4bda-a509-1e30b6384522"
+QuantumOptics = "6e0679c1-51ea-5a7c-ac74-d61b76210b0c"
+
+[sources]
+QuantumDynamics = {path = "../.."}
