@@ -11,13 +11,13 @@
 #   1. Activates the environment and includes FockLadder_problem.jl (which
 #      itself includes Definition.jl and NNQuantum.jl — see that file's own
 #      header for why it depends on NNQuantum.jl directly).
-#   2. Defines run_Fock_ladder(N_steps, basis_id; ...) and
-#      generate_decom_basis — the orchestrating "run" functions that call
-#      into FockLadder_problem.jl (for settings, dynamics,
-#      FL_1step_3p_NN_outputs/_inputs, predict_drive_parameters) and
-#      NNQuantum.jl (for train_NN, save/load of datasets/NNs/bases/
-#      predictions, plot_trajectory) — never holding either kind of logic
-#      itself.
+#   2. Defines run_Fock_ladder(N_steps, basis_id; ...) — the orchestrating
+#      "run" function, calling into FockLadder_problem.jl (for settings,
+#      dynamics, FL_1step_3p_NN_outputs/_inputs, predict_drive_parameters)
+#      and NNQuantum.jl (for train_NN, generate_decom_basis, save/load of
+#      datasets/NNs/bases/predictions, plot_trajectory) — never holding
+#      either kind of logic itself. generate_decom_basis itself is called
+#      from here but defined in NNQuantum.jl (DESIGN.md Part 18/19).
 #
 #   This is the version staged-validated in test.jl (N_steps=1 then 2, see
 #   DESIGN.md Parts 11-13 and test_log.md) and promoted here once reviewed —
@@ -240,7 +240,7 @@ function run_Fock_ladder(N_steps::Integer, basis_id::Integer;
     basis_path = _decom_basis_path(basis_id, save_dir)
     isfile(basis_path) || throw(ArgumentError(
         "run_Fock_ladder: no saved basis at $basis_path — call " *
-        "generate_decom_basis($basis_id; save_dir=\"$save_dir\") first"))
+        "generate_decom_basis(cs, $basis_id; save_dir=\"$save_dir\") first"))
     decom_basis = load_operator_basis(basis_path, cs.basis)
 
     prs(τ_exc, ωd, τ_SWAP) = 1 / prod(dim_parameters_space)
