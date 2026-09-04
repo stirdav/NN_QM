@@ -112,11 +112,11 @@ recorded in its `params`) and `trajectory_bspline_target<n>_b<id>.png`
 returns, since there is no step dimension here.
 """
 function run_FockTarget_Bspline(n_target::Integer, basis_id::Integer;
-                                 n_samples::Integer=800,
-                                 T_max::Real=0.03,
-                                 coeff_range::Tuple{<:Real,<:Real}=(-50.0, 50.0),
-                                 n_basis::Integer=10,
-                                 degree::Integer=4,
+                                 n_samples::Integer=3000,
+                                 T_max::Real=0.04,
+                                 coeff_range::Tuple{<:Real,<:Real}=(-300.0, 300.0),
+                                 n_basis::Integer=30,
+                                 degree::Integer=6,
                                  save_dir::AbstractString=@__DIR__,
                                  train_fraction::Real=0.9375,
                                  hidden::Integer=500,
