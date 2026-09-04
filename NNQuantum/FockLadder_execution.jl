@@ -2,20 +2,22 @@
 #
 # (Renamed from execution.jl — see CLAUDE.md / DESIGN.md for the rename note.)
 #
-# Two things live here:
-#   1. Environment activation + including the problem definition
-#      (FockLadder_problem.jl) — step 1's scope, unchanged from before the
-#      rename.
-#   2. run_Fock_ladder(N_steps, basis_id; ...) — a generic-N_steps loop
-#      structured around the user's own generate/train/predict/reiterate
-#      algorithm (CLAUDE.md's Plan, step 3), not old_version's
-#      execution_dynamic_FL directly. Per step: generates and saves one
-#      FL_1step_3p dataset, trains a NN on it and predicts drive parameters
-#      for the target state (FockLadder_problem.jl's train_NN/
-#      predict_drive_parameters, thin wrappers around NNQuantum.jl's
-#      problem-agnostic machinery), saves the prediction and plots its
-#      trajectory, and reiterates using the state the prediction actually
-#      reaches — see run_Fock_ladder's own docstring.
+# This file is deliberately thin (DESIGN.md Part 17/18 — the project's
+# standing three-way rule): NNQuantum.jl holds the generic ML/dataset-
+# management engine; FockLadder_problem.jl holds the quantum problem's own
+# definition (dynamics functions) *and* its dataset input/output creation
+# (FL_1step_3p_NN_outputs/_inputs) and NN-facing glue (predict_drive_
+# parameters) — none of that belongs here. This file only:
+#   1. Activates the environment and includes FockLadder_problem.jl (which
+#      itself includes Definition.jl and NNQuantum.jl — see that file's own
+#      header for why it depends on NNQuantum.jl directly).
+#   2. Defines run_Fock_ladder(N_steps, basis_id; ...) and
+#      generate_decom_basis — the orchestrating "run" functions that call
+#      into FockLadder_problem.jl (for settings, dynamics,
+#      FL_1step_3p_NN_outputs/_inputs, predict_drive_parameters) and
+#      NNQuantum.jl (for train_NN, save/load of datasets/NNs/bases/
+#      predictions, plot_trajectory) — never holding either kind of logic
+#      itself.
 #
 #   This is the version staged-validated in test.jl (N_steps=1 then 2, see
 #   DESIGN.md Parts 11-13 and test_log.md) and promoted here once reviewed —
@@ -36,16 +38,18 @@ using QuantumDynamics
 using QuantumOptics
 
 include("Definition.jl")
-include("FockLadder_problem.jl")   # (renamed from HBAR-qubit_problem.jl)
+include("FockLadder_problem.jl")   # (renamed from HBAR-qubit_problem.jl) — this in turn
+                                     # includes NNQuantum.jl, so both are available here
+                                     # transitively; no separate include needed.
 
 # FockLadder_problem.jl's (a)-(g) are the *setup* of the HBAR+qubit system
-# (parameters, subsystems, Hamiltonian, dissipators, protocol runner) — all
-# live code, exercised by this include. Step 2's actual validation run
-# (physically-tuned pulse parameters, plot ⟨n_qubit⟩/⟨n_mech⟩) lives in
-# test.jl, not here — see CLAUDE.md's Scope note on test.jl's role. (h)'s
-# dataset-generation functions (FL_1step_3p_NN_outputs/_inputs,
-# save_dataset) are also live from this include — run_Fock_ladder
-# below is what drives them across a full ladder, generic-N_steps.
+# (parameters, subsystems, Hamiltonian, dissipators, protocol runner), plus
+# its own FL_1step_3p_NN_outputs/_inputs (dataset creation) and
+# predict_drive_parameters (NN-facing glue) — all live code, exercised by
+# this include. Step 2's actual validation run (physically-tuned pulse
+# parameters, plot ⟨n_qubit⟩/⟨n_mech⟩) lives in test.jl, not here — see
+# CLAUDE.md's Scope note on test.jl's role. run_Fock_ladder below is what
+# drives the dataset/NN pieces across a full ladder, generic-N_steps.
 
 qubit_basis = getsubsystem(cs, :qubit).basis
 osc_basis   = getsubsystem(cs, :osc).basis
@@ -76,50 +80,16 @@ end
 
 # File names for one basis_id: every file that belongs together (the basis
 # itself, and every dataset/NN made using it) ends in "_b<basis_id>", so the
-# number in the name is what tells you which basis a file goes with — see
-# generate_decom_basis's own docstring below for why this replaced silently
-# making a new basis inside run_Fock_ladder.
-_decom_basis_path(basis_id, save_dir) = joinpath(save_dir, "decom_basis_b$(basis_id).jld2")
+# number in the name is what tells you which basis a file goes with —
+# generate_decom_basis (NNQuantum.jl, DESIGN.md Part 18 — relocated and
+# generalized from a local copy that used to live here) is what makes that
+# file, called explicitly, e.g. `generate_decom_basis(cs, 1)`.
+_decom_basis_path(basis_id, save_dir) = joinpath(save_dir, decom_basis_filename(basis_id))
 _dataset_path(basis_id, step, save_dir) = joinpath(save_dir, "dataset_step$(step)_b$(basis_id).jld2")
 _nn_path(basis_id, step, save_dir) = joinpath(save_dir, "nn_step$(step)_b$(basis_id).jld2")
 _predicted_path(basis_id, step, save_dir) = joinpath(save_dir, "predicted_step$(step)_b$(basis_id).jld2")
 _trajectory_plot_path(basis_id, step, save_dir) = joinpath(save_dir, "trajectory_step$(step)_b$(basis_id).png")
 _full_trajectory_plot_path(basis_id, save_dir) = joinpath(save_dir, "trajectory_full_b$(basis_id).png")
-
-"""
-    generate_decom_basis(basis_id::Integer; save_dir=@__DIR__, overwrite=false)
-
-Make a new, random decomposition basis and save it to
-`save_dir/decom_basis_b<basis_id>.jld2`. This is its own separate step — call
-it once, by hand, whenever you actually want a new basis. Then reuse the same
-`basis_id` in `run_Fock_ladder` calls (even in a later Julia session) until
-you decide to make a different one.
-
-Why this is separate from `run_Fock_ladder` now: a dataset or a trained NN
-only makes sense together with the *exact* basis it was built from. An
-earlier version of this feature made a new basis automatically inside
-`run_Fock_ladder`, and that caused a real bug (`DESIGN.md` Part 8) — a
-dataset or NN saved under one basis got paired with a different one when
-reloaded later, giving wrong predictions with no error at all. Making the
-basis its own explicit, named, saved step removes that risk: `run_Fock_ladder`
-now always loads a basis, never makes one.
-
-Refuses to overwrite an existing file for the same `basis_id` unless
-`overwrite=true` — there may already be datasets/NNs saved against it, and
-replacing it quietly would break that pairing.
-"""
-function generate_decom_basis(basis_id::Integer; save_dir::AbstractString=@__DIR__, overwrite::Bool=false)
-    path = _decom_basis_path(basis_id, save_dir)
-    isfile(path) && !overwrite && throw(ArgumentError(
-        "generate_decom_basis: $path already exists — pass overwrite=true to replace it " *
-        "(any dataset/NN already saved with basis_id=$(basis_id) would then no longer match it)"))
-
-    d = length(cs.basis)
-    basis_ops = rand_hermitian_orthonormal_basis(d, cs.basis)
-    save_operator_basis(path, basis_ops; description="FL_1step_3p decomposition basis b$(basis_id)")
-    println("Generated and saved decomposition basis b$(basis_id) to $(path)")
-    return path
-end
 
 """
     run_Fock_ladder(N_steps, basis_id; n_samples=800, dim_parameters_space=[100,100,100],
@@ -144,10 +114,12 @@ around this project's own step numbering):
      *actually* reach (not the target state itself) as next step's initial
      condition, until `N_steps` is reached.
 
-**Status: all five steps (0-4) are implemented — DESIGN.md Part 6 (iv).**
-Steps 2-3 are `train_NN`/`predict_drive_parameters` (`FockLadder_problem.jl`),
-thin `:FL_1step_3p`-specific wrappers around `NNQuantum.jl`'s generic
-`train_and_test_NN`/`predict_and_score`; the keyword arguments here
+**Status: all five steps (0-4) are implemented — DESIGN.md Part 6 (iv), settled
+per Parts 17-18's three-file rule.** Steps 2-3 are `train_NN` (`NNQuantum.jl`
+— fully generic, no problem-specific wrapper needed) and
+`predict_drive_parameters` (`FockLadder_problem.jl` — the one piece of
+NN-facing glue that is genuinely `:FL_1step_3p`-specific) around
+`NNQuantum.jl`'s generic `train_and_test_NN`/`predict_and_score`; the keyword arguments here
 (`train_fraction`/`hidden`/`η`/`epochs`/`loss`/`batch_size`) just pass
 through to those, defaulting to `Chu_DFL_execution.ipynb`'s own
 `:FL_1step_3p`/`:master_dynamic` cell values where that cell has an
@@ -165,7 +137,7 @@ replace it, per the restructure documented further up this file's own
 history in `DESIGN.md`.
 
 `uniform` (default `true`) controls how step 1's `(τ_exc,ωd,τ_SWAP)` triples
-are drawn: this function's own sampling weight, `prs`, is a hardcoded
+are drawn: this function's own sampling weight, `prs`, is a hardcodedbar (same place as in your 
 constant (`1/prod(dim_parameters_space)`, independent of the point) — there
 is no live path here where the sampling is actually non-uniform — so the
 default skips `FL_1step_3p_NN_outputs`'s dense-grid-then-weighted-draw
@@ -180,10 +152,10 @@ original grid-based sampling.
 (the random set of operators every feature vector, training or prediction, is
 built from) is no longer made inside `run_Fock_ladder` at all — it is always
 loaded from `save_dir/decom_basis_b<basis_id>.jld2`, made ahead of time by
-calling `generate_decom_basis(basis_id)` once. If that file doesn't exist,
-`run_Fock_ladder` stops with a clear error telling you to call
-`generate_decom_basis` first, instead of silently making a new one. See
-`generate_decom_basis`'s own docstring for why this is a separate step now —
+calling `generate_decom_basis(cs, basis_id)` once (`NNQuantum.jl` — DESIGN.md
+Part 18). If that file doesn't exist, `run_Fock_ladder` stops with a clear
+error telling you to call `generate_decom_basis` first, instead of silently
+making a new one. See `generate_decom_basis`'s own docstring for why this is a separate step now —
 a dataset or NN only means what it means together with the exact basis it
 was built from, and a real bug came from making a fresh, unsaved basis
 automatically on every call (`DESIGN.md` Part 8).
@@ -437,6 +409,6 @@ end
 # including this file. A basis has to exist first (generate_decom_basis
 # only needs doing once — reuse the same basis_id afterward):
 #
-#   generate_decom_basis(1)                 # makes decom_basis_b1.jld2
+#   generate_decom_basis(cs, 1)              # makes decom_basis_b1.jld2
 #   run_Fock_ladder(6, 1)                    # old_version's own N_steps, full-size
 #   run_Fock_ladder(3, 1; n_samples=20)      # a cheaper multi-step check

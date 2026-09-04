@@ -10,10 +10,13 @@
 # HBAR-qubit-specific quantity — so they move here unchanged, out of the
 # problem file.
 #
-# weighted_sample stays in FockLadder_problem.jl: DESIGN.md Part 4 treats
-# it separately from this "generic helpers" trio ("One deliberate
-# non-port", its own paragraph, not grouped with these three), so it
-# wasn't moved here without being asked to.
+# weighted_sample also lives here (DESIGN.md Part 17) — originally kept in
+# FockLadder_problem.jl as "One deliberate non-port" (Part 4), separate from
+# this trio, but relocated once the project settled on a firm NNQuantum.jl
+# (NN/dataset engine, problem-agnostic) vs. FockLadder_problem.jl (quantum
+# problem definition, NN-agnostic) boundary — a generic weighted-sampling
+# utility belongs here either way, whichever problem's dataset generation
+# calls it.
 #
 # DESIGN.md Part 6 (ii) adds the actual training loop / normalization /
 # loss dispatch / prediction orchestration below, ported from old_version/
@@ -132,6 +135,66 @@ function load_operator_basis(path::AbstractString, basis; expected_format_versio
     return [Operator(basis, d) for d in data]
 end
 
+# --- Making a new decomposition basis, once, on purpose --------------------------
+#
+# Relocated from FockLadder_execution.jl (DESIGN.md Part 18): "creating...
+# matrix basis" is explicitly rule 1's job (this project's standing
+# three-way file-boundary rule, CLAUDE.md's Scope note), and this function
+# was already, in substance, fully generic — it only ever needed a composite
+# system's `.basis`/dimension, `rand_hermitian_orthonormal_basis`, and
+# `save_operator_basis`, all already here. Generalized to take the composite
+# system as a plain argument (`cs`, duck-typed — needs only `cs.basis`, so
+# this file still never `using QuantumDynamics`) instead of a hardcoded
+# module-level `cs`, so both `:FL_1step_3p` (`FockLadder_execution.jl`) and
+# `:FL_1step_Bspline` (`Bspline_Fock_execution.jl`) call this one function
+# rather than each keeping its own copy — the exact duplication this rule
+# exists to avoid.
+#
+# `prefix` (default `"decom_basis"`) lets different problems keep distinct
+# file names in a shared `save_dir` without colliding — e.g.
+# `:FL_1step_Bspline` uses `"decom_basis_bspline"`, since its own composite
+# dimension (`d=8`) differs from `:FL_1step_3p`'s (`d=12`), and DESIGN.md
+# Part 8's own bug (a dataset/NN silently paired with the wrong basis) is
+# exactly the failure mode distinct names guard against.
+decom_basis_filename(basis_id::Integer; prefix::AbstractString="decom_basis") =
+    "$(prefix)_b$(basis_id).jld2"
+
+"""
+    generate_decom_basis(cs, basis_id::Integer; save_dir=".", overwrite=false, prefix="decom_basis")
+
+Make a new, random decomposition basis for the composite system `cs` (needs
+only `cs.basis`) and save it to `save_dir/<prefix>_b<basis_id>.jld2`. This is
+its own separate step — call it once, by hand, whenever you actually want a
+new basis. Then reuse the same `basis_id` (and `prefix`, if not the default)
+in later calls (even in a later Julia session) until you decide to make a
+different one.
+
+Why this is separate from a `run_...` orchestrator: a dataset or a trained NN
+only makes sense together with the *exact* basis it was built from. An
+earlier version of this feature made a new basis automatically inside such an
+orchestrator, and that caused a real bug (`DESIGN.md` Part 8) — a dataset or
+NN saved under one basis got paired with a different one when reloaded later,
+giving wrong predictions with no error at all. Making the basis its own
+explicit, named, saved step removes that risk.
+
+Refuses to overwrite an existing file for the same `basis_id`/`prefix` unless
+`overwrite=true` — there may already be datasets/NNs saved against it, and
+replacing it quietly would break that pairing.
+"""
+function generate_decom_basis(cs, basis_id::Integer; save_dir::AbstractString=".",
+                               overwrite::Bool=false, prefix::AbstractString="decom_basis")
+    path = joinpath(save_dir, decom_basis_filename(basis_id; prefix=prefix))
+    isfile(path) && !overwrite && throw(ArgumentError(
+        "generate_decom_basis: $path already exists — pass overwrite=true to replace it " *
+        "(any dataset/NN already saved with basis_id=$(basis_id) would then no longer match it)"))
+
+    d = length(cs.basis)
+    basis_ops = rand_hermitian_orthonormal_basis(d, cs.basis)
+    save_operator_basis(path, basis_ops; description="decomposition basis b$(basis_id) (d=$(d))")
+    println("Generated and saved decomposition basis b$(basis_id) to $(path)")
+    return path
+end
+
 # Ported unchanged from old_version/ML_QM_library.jl:294-303 (needs Julia's
 # Base.logrange for the third, log-spaced dimension — available since 1.11,
 # no extra dependency).
@@ -144,6 +207,18 @@ function threeD_parameter_space(p, parameters_range, dim_parameters_space)
     prob = vec([p(x, y, z) for (x, y, z) in parameters_space])
 
     return parameters_space, prob
+end
+
+# Relocated from FockLadder_problem.jl (DESIGN.md Part 17) — see the header
+# note above threeD_parameter_space for why. Replaces old_version's
+# `sample(space, Weights(prob), n)` (StatsBase) with a small hand-rolled
+# cumulative-weight sampler, to avoid pulling in a new dependency for one
+# weighted-sampling call.
+function weighted_sample(items, weights, n)
+    cumw = cumsum(weights)
+    total = cumw[end]
+    total > 0 || throw(ArgumentError("weighted_sample: all weights are zero"))
+    return [items[searchsortedfirst(cumw, rand() * total)] for _ in 1:n]
 end
 
 # Direct continuous sampling of n_samples (x,y,z) triples uniformly within
@@ -198,11 +273,64 @@ end
 # never names FLstep_dynamics_3p, it only calls whatever `simulate` it's
 # given.
 
+# --- Dataset persistence (JLD2) -----------------------------------------------
+#
+# Relocated from FockLadder_problem.jl (DESIGN.md Part 17 — originally added
+# there in Part 4, back when this file didn't exist yet). Saves an
+# inputs/outputs pair (e.g. FockLadder_execution.jl's FL_1step_3p_NN_outputs/
+# FL_1step_3p_NN_inputs) to a .jld2 file, one row per sample:
+# vcat(inputs[i], outputs[i]) — the NN input features followed by whatever
+# output parameters produced them. Neither function references anything
+# problem-specific; a caller's own inputs/outputs shapes are all that
+# determines the row layout. Same row layout as old_version's
+# dataset_creation (ML_QM_library.jl:232-253, input columns then output
+# columns), but as a standalone function rather than dataset_creation's own
+# role folded into old_version's larger dataset_generation orchestrator — no
+# such orchestrator exists in NNQuantum.
+#
+# jldsave with separate top-level keys plus a format_version, not one
+# serialized blob, follows QuantumDynamics/framework's own io.jl convention
+# (see save_result there) — a schema change later can then fall back on a
+# missing key instead of depending on JLD2 correctly reconstructing an
+# evolved struct shape.
+const DATASET_FORMAT_VERSION = 1
+
+function dataset_rows(inputs, outputs)
+    length(inputs) == length(outputs) || throw(ArgumentError(
+        "dataset_rows: inputs and outputs have different lengths ($(length(inputs)) vs $(length(outputs)))"))
+    return [Float64.(vcat(inputs[i], collect(outputs[i]))) for i in eachindex(inputs)]
+end
+
+"""
+    save_dataset(path, inputs, outputs; description="", params=Dict{Symbol,Any}())
+
+Save a dataset to `path` (a `.jld2` file). `inputs`/`outputs` are a
+problem-specific dataset-generation pair's own return values (e.g.
+`FockLadder_execution.jl`'s `FL_1step_3p_NN_inputs`/`FL_1step_3p_NN_outputs`)
+— same length, row `i` of the saved `dataset` matrix is
+`vcat(inputs[i], outputs[i])`. `dim_input`/`dim_output` are saved alongside
+so a later `dataset[:, 1:dim_input]`/`dataset[:, dim_input+1:end]` split
+doesn't need `inputs`/`outputs` themselves still in memory.
+"""
+function save_dataset(path::AbstractString, inputs, outputs;
+                       description::AbstractString="", params::Dict{Symbol,Any}=Dict{Symbol,Any}())
+    rows = dataset_rows(inputs, outputs)
+    jldsave(path;
+        format_version=DATASET_FORMAT_VERSION,
+        dataset=permutedims(reduce(hcat, rows)),
+        dim_input=length(inputs[1]),
+        dim_output=length(outputs[1]),
+        description=description,
+        params=params,
+    )
+    nothing
+end
+
 # --- Dataset loading (JLD2), replaces old_version's in-memory dataset_generation split ---
 #
-# save_dataset (FockLadder_problem.jl, Part 4) already writes dim_input/
-# dim_output alongside the stacked dataset matrix specifically so a reload
-# doesn't need inputs/outputs still in memory — this is that reload.
+# save_dataset (above) already writes dim_input/dim_output alongside the
+# stacked dataset matrix specifically so a reload doesn't need
+# inputs/outputs still in memory — this is that reload.
 #
 # `expected_format_version`, if given, is checked against the file's own
 # `format_version` key and raises loudly on a mismatch, rather than
@@ -509,6 +637,42 @@ function train_and_test_NN(X::AbstractMatrix, Y::AbstractMatrix, n_training::Int
     return (model=model, opt_state=opt_state, losses=losses, test_error=test_error, test_predictions=test_predictions,
             maxs_input=maxs_input, mins_input=mins_input, maxs_output=maxs_output, mins_output=mins_output,
             dim_input=dim_input, dim_output=dim_output, hidden=hidden, η=η)
+end
+
+# --- train_NN: convenience dispatch on top of train_and_test_NN -----------------
+#
+# Relocated from FockLadder_problem.jl (DESIGN.md Part 17), where it was
+# originally written as a ":FL_1step_3p wrapper" (Part 6 (iv)) around
+# train_and_test_NN — re-examined during that move and found to already be
+# fully generic: neither method below references a pulse parameter,
+# decom_basis, or FLstep_dynamics_3p by name, so "thin wrapper" framing was
+# never actually load-bearing for this function, only for
+# FockLadder_execution.jl's predict_drive_parameters (which does need one).
+#
+# The vector method converts a problem's own FL_1step_3p_NN_outputs/_inputs-
+# style return shapes — inputs a Vector{Vector{Float64}} (one feature row
+# per sample), outputs a Vector{<:Tuple} or Vector{<:AbstractVector} (one
+# output-parameter sample per row; `collect.(outputs)` handles either
+# generically) — into the plain Float64 matrices the matrix method expects,
+# then delegates to it. The matrix method exists separately because a
+# dataset loaded from disk via load_dataset already comes back as plain
+# Float64 matrices, not a problem's own vector-of-vector/vector-of-tuple
+# shapes — callers reach either method via ordinary Julia multiple dispatch,
+# no runtime branch needed.
+#
+# train_fraction=0.9375 matches Chu_DFL_execution.ipynb's own
+# :FL_1step_3p/:master_dynamic cell (n_training=750 of n_samples=800);
+# clamped to leave at least one sample on each side of the split so a small
+# smoke-test n_samples doesn't produce an empty train or test set.
+function train_NN(X::AbstractMatrix, Y::AbstractMatrix; train_fraction::Real=0.9375, kwargs...)
+    n_training = clamp(round(Int, train_fraction * size(X, 1)), 1, size(X, 1) - 1)
+    return train_and_test_NN(X, Y, n_training; kwargs...)
+end
+
+function train_NN(inputs::AbstractVector, outputs::AbstractVector; kwargs...)
+    X = permutedims(reduce(hcat, inputs))
+    Y = permutedims(reduce(hcat, collect.(outputs)))
+    return train_NN(X, Y; kwargs...)
 end
 
 # --- Prediction orchestration ----------------------------------------------------

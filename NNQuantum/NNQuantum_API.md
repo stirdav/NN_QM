@@ -12,14 +12,15 @@ The key idea: **`NNQuantum.jl` knows nothing about quantum physics.** It never m
 
 The actual quantum-physics problem (the Fock ladder) lives in `FockLadder_problem.jl` and `FockLadder_execution.jl`. Those two files are the ones that know about qubits, pulses, and the specific physics. They call into `NNQuantum.jl` to do the "learning" part.
 
-## How the two sides connect
+## How the pieces connect
 
-Think of it as two layers:
+Think of it as three layers:
 
-- **`NNQuantum.jl` (this file)** — generic. Give it plain numbers in, get plain numbers out.
-- **`FockLadder_problem.jl` (a "thin wrapper")** — specific to this one physics problem. It turns a physics question ("what pulse reaches this quantum state?") into the plain-number form `NNQuantum.jl` understands, calls into `NNQuantum.jl`, and turns the plain-number answer back into a physics answer (a pulse).
+- **`NNQuantum.jl` (this file)** — generic. Give it plain numbers in, get plain numbers out. Knows nothing about qubits or pulses. Also where dataset/basis/model files get saved and loaded (`save_dataset`, `save_operator_basis`, `save_nn`, ...) — the file-management side of things lives here too, not just training itself.
+- **`FockLadder_problem.jl`** — the physics side: the qubit/oscillator system, its Hamiltonian, its dissipators, the raw functions that simulate a trajectory (`FLstep_dynamics_3p` and friends) — *and* this problem's own dataset-generation functions (`FL_1step_3p_NN_outputs`/`FL_1step_3p_NN_inputs`) and NN-facing glue (`predict_drive_parameters`), since building a dataset row or a prediction target is itself a "physics meets the NN's expected shape" job specific to this problem, not something `NNQuantum.jl` could do generically.
+- **`FockLadder_execution.jl`** — thin orchestration only: the `run_Fock_ladder`/`generate_decom_basis` loop that calls into `FockLadder_problem.jl` for settings/dynamics/dataset-creation and into `NNQuantum.jl` for training/saving/loading. It holds no dataset-creation or NN-wrapper logic of its own.
 
-The wrapper functions are `train_NN` and `predict_drive_parameters`, both in `FockLadder_problem.jl`. If you ever plug in a new quantum problem, these two functions are the ones you would rewrite — `NNQuantum.jl` itself should not need to change.
+The one function you'd actually need to write yourself for a new quantum problem is `predict_drive_parameters` (in your own `*_problem.jl`) — it builds the one input `predict_and_score` needs (a feature vector for your target state) and a `simulate` closure over your own dynamics function. `train_NN` itself, despite living in `NNQuantum.jl`, needs no rewriting per problem — it turns any problem's own dataset shape (`Vector{Vector}`/`Vector{<:Tuple}`, or plain matrices) into `X`/`Y` and calls `train_and_test_NN`; nothing about it is Fock-ladder-specific.
 
 ## What the file depends on
 
@@ -42,15 +43,19 @@ using CairoMakie      # plotting a trajectory
 | `qo_infidelity(a, b)` | How different two quantum states are (0 = identical, 1 = as different as possible). |
 | `rand_hermitian_orthonormal_basis(d, basis)` | Makes a random set of operators, used to turn a quantum state into a list of plain numbers. |
 | `save_operator_basis` / `load_operator_basis` | Save/reload that operator set to/from a file. |
+| `generate_decom_basis(cs, basis_id)` | Make a new decomposition basis for a composite system `cs` and save it, once, on purpose. |
 | `threeD_parameter_space(p, ranges, sizes)` | Builds a grid of points over 3 ranges, weighted by a probability function `p`. |
+| `weighted_sample(items, weights, n)` | Draws `n` items from a list, favoring higher-weighted ones — typically used together with `threeD_parameter_space`'s output. |
 | `uniform_parameter_sample(ranges, n)` | Draws `n` random points directly from 3 ranges — quicker than the grid above, but only correct when every point should be equally likely. |
-| `load_dataset` / `train_test_split` | Load a saved dataset back from disk, and split it into a training part and a testing part. |
+| `dataset_rows` / `save_dataset` / `load_dataset` | Turn an inputs/outputs pair into one-row-per-sample form, save it to a file, and load it back. |
+| `train_test_split` | Split a dataset into a training part and a testing part. |
 | `normalize_data` / `denormalize_data` / `max_min` / `train_test_dataset_normalization` | Rescale numbers into a `0`-to-`1`-ish range before training (and back again after). |
 | `relative_mse`, `mape`, `loss_1`, `LOSS_FUNCTIONS`, `resolve_loss` | A few ways to measure how wrong a prediction is, and a way to pick one by name. |
 | `build_default_model(dim_input, dim_output)` | Builds a fresh, untrained neural network of the right input/output size. |
 | `train_model!` | Trains a model on data, for a number of epochs. |
 | `test_model` | Measures how well a trained model does on data it wasn't trained on. |
 | `train_and_test_NN` | Does the whole thing in one call: split the data, normalize it, build (or reuse) a model, train it, test it. |
+| `train_NN` | A convenience wrapper around `train_and_test_NN` that also accepts a problem's own raw dataset shape (`Vector{Vector}`/`Vector{<:Tuple}`), not just plain matrices. |
 | `predict_output` | Feed one input into a trained model and get a real-world (denormalized) answer back. |
 | `predict_and_score` | Predict an answer, use it to run a simulation, and score how close the result got to a target. |
 | `save_nn` / `load_nn` | Save a trained model (and everything needed to use it again) to a file, and load it back later. |
@@ -86,7 +91,7 @@ Makes such a set, for a quantum system of dimension `d`, expressed in the given 
 - Returns a list of `d^2` operators.
 - **Important**: every call makes a genuinely different, random set — nothing is fixed between calls. That is fine as long as you make the basis once and reuse the *same* one for everything that depends on it (generating data, training, and predicting). Mixing two different bases — say, training on one and predicting with another — silently gives meaningless results, since the same list of numbers would mean two different things.
 
-Because of that risk, this project never calls this function directly to start a run — instead, it goes through `generate_decom_basis` in `FockLadder_execution.jl`, which makes a basis **once**, on purpose, and saves it under a chosen number (see that function's own documentation). `run_Fock_ladder` then always loads a saved basis, rather than making a fresh one each time.
+Because of that risk, this project never calls this function directly to start a run — instead, it goes through `generate_decom_basis` (below), which makes a basis **once**, on purpose, and saves it under a chosen number. `run_Fock_ladder`/`run_FockTarget_Bspline` then always load a saved basis, rather than making a fresh one each time.
 
 ### `save_operator_basis(path, ops; description="", params=Dict())` / `load_operator_basis(path, basis; expected_format_version=nothing)`
 
@@ -95,6 +100,14 @@ Save a list of operators (e.g., `rand_hermitian_orthonormal_basis`'s own output)
 - `save_operator_basis` stores the plain numbers behind each operator, not the operator object itself — this makes the file safe to reload even if the underlying quantum library changes internally later.
 - `load_operator_basis` needs you to supply the `basis` to rebuild the operators against (your own system's basis, e.g. `cs.basis`) — the file itself does not carry this, since you already have it on hand.
 - `expected_format_version` is optional. If you pass a number, the function checks the saved file was written in that same format and stops with a clear error if not, rather than silently reading something that doesn't match.
+
+### `generate_decom_basis(cs, basis_id; save_dir=".", overwrite=false, prefix="decom_basis")`
+
+Makes a new decomposition basis for the composite system `cs` and saves it — the one place `rand_hermitian_orthonormal_basis` actually gets called to start a real run. Call it once, by hand, whenever you want a new basis; reuse the same `basis_id` afterward (even in a later Julia session) until you decide to make a different one.
+
+- `cs` only needs a `.basis` field (e.g. `FockLadder_problem.jl`'s `cs`, or `Bspline_Fock_problem.jl`'s `cs_res`) — this function never assumes which problem it's for.
+- Saved to `save_dir/<prefix>_b<basis_id>.jld2`. `prefix` (default `"decom_basis"`) is what keeps two different problems' basis files from colliding in a shared `save_dir` — e.g. this project's own `:FL_1step_Bspline` uses `prefix="decom_basis_bspline"`, since its composite dimension differs from `:FL_1step_3p`'s. Mixing up which basis a dataset/NN was built against silently gives meaningless results (same risk `rand_hermitian_orthonormal_basis`'s own note above describes) — distinct file names are what prevent that.
+- Refuses to overwrite an existing file for the same `basis_id`/`prefix` unless `overwrite=true` — a dataset or NN may already be saved against it.
 
 ---
 
@@ -111,6 +124,10 @@ Builds a full grid of points across three ranges (the third one spaced logarithm
 - Returns `(points, probabilities)` — the full list of grid points, and a matching list of how likely each one is.
 - This can be slow and use a lot of memory if `n1*n2*n3` is large, since it builds every point up front. Use this only when `p` really does treat some points as more likely than others.
 
+### `weighted_sample(items, weights, n)`
+
+Draws `n` items from a list (`items`), where an item with a bigger `weights` entry is more likely to be drawn — with replacement, so the same item can come up more than once. This is the usual partner for `threeD_parameter_space`'s output: `points, probabilities = threeD_parameter_space(...)`, then `weighted_sample(points, probabilities, n_samples)` turns that whole weighted grid into `n_samples` actual sample points.
+
 ### `uniform_parameter_sample(parameters_range, n_samples)`
 
 Directly draws `n_samples` random points from the same three ranges (again, log-spaced in the third one), without building a grid first.
@@ -122,9 +139,17 @@ Directly draws `n_samples` random points from the same three ranges (again, log-
 
 ## Working with a saved dataset
 
+### `dataset_rows(inputs, outputs)`
+
+Turns an `inputs`/`outputs` pair (e.g. `FockLadder_execution.jl`'s `FL_1step_3p_NN_inputs`/`FL_1step_3p_NN_outputs`) into a list of plain rows, one per sample — each row is just `inputs[i]` followed by `outputs[i]`, joined together. Mostly an internal helper for `save_dataset` below, but usable on its own if you want the row form without saving it.
+
+### `save_dataset(path, inputs, outputs; description="", params=Dict())`
+
+Saves an `inputs`/`outputs` pair to a `.jld2` file, one row per sample (via `dataset_rows`). Also records how many columns are input vs. output, so `load_dataset` can split them back apart correctly.
+
 ### `load_dataset(path; expected_format_version=nothing)`
 
-Loads a dataset that was saved to a `.jld2` file (by this project's own `save_dataset`, in `FockLadder_problem.jl`).
+Loads a dataset that was saved to a `.jld2` file by `save_dataset` above.
 
 - Returns `(X, Y)` — two plain matrices: `X` is the input columns, `Y` is the output columns.
 - `expected_format_version` works the same way as in `load_operator_basis` above.
@@ -194,6 +219,14 @@ This is the one you'll normally call — it does the whole job in one step: spli
 - `n_training` — how many rows go to training (the rest go to testing).
 - `model`/`opt_state` — optional. Leave both as `nothing` to get a brand-new model from `build_default_model`. Or pass in both together (never just one) to keep training a model you already have — this is how "keep training an existing NN" works.
 - Returns one bundle (a `NamedTuple`) holding everything you might need next: `model`, `opt_state`, `losses`, `test_error`, `test_predictions`, the four normalization stats (`maxs_input`, `mins_input`, `maxs_output`, `mins_output`), and `dim_input`, `dim_output`, `hidden`, `η`. Keep this whole bundle together — `predict_and_score` and `save_nn` (below) both expect it as one piece, not its parts separately.
+
+### `train_NN(X, Y; train_fraction=0.9375, kwargs...)` / `train_NN(inputs, outputs; kwargs...)`
+
+A small convenience layer on top of `train_and_test_NN`, for when you'd rather give a fraction than an exact `n_training` row count, or your dataset isn't in plain-matrix form yet.
+
+- The `X`/`Y` (matrix) method just works out `n_training` from `train_fraction` and calls `train_and_test_NN` — `train_fraction` is clamped so there's always at least one row on each side of the split, even for a tiny smoke-test dataset.
+- The `inputs`/`outputs` method accepts a problem's own raw dataset shape directly — `inputs` a list of feature vectors, `outputs` a list of tuples or vectors (whichever your dataset-generation code produced) — converts both to plain matrices, then calls the method above.
+- Despite living in this file, `train_NN` never looks at what problem produced its data — any quantum problem's own dataset-generation code can call it unchanged.
 
 ---
 
@@ -295,9 +328,8 @@ prediction = predict_output(nn.model, x_new, nn.maxs_input, nn.mins_input, nn.ma
 
 ## If you want to plug in a different quantum problem
 
-You would not need to change anything in `NNQuantum.jl`. Instead, write your own version of `FockLadder_problem.jl`'s two wrapper functions:
+You would not need to change anything in `NNQuantum.jl` — and you can call `train_NN` directly, unchanged, since it's already generic (it only cares about your dataset's shape, not what problem produced it). The one thing you'd write yourself, in your own `*_problem.jl`:
 
-- **A `train_NN`-like function** — turn your problem's own dataset shape into plain `X`/`Y` matrices, then call `train_and_test_NN`.
-- **A `predict_drive_parameters`-like function** — build the one input `predict_and_score` needs (a feature vector for your target state), and a `simulate` function that runs *your* physics simulation, then call `predict_and_score`.
+- **A `predict_drive_parameters`-like function**, mirroring `FockLadder_problem.jl`'s own — build the one input `predict_and_score` needs (a feature vector for your target state), and a `simulate` function that runs *your* physics simulation, then call `predict_and_score`.
 
 Everything else — training, testing, normalizing, saving, loading — is already handled, unchanged, by `NNQuantum.jl`.

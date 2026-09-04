@@ -10,6 +10,28 @@
 # Hamiltonian (d), drive-shape machinery (e), dissipators (f), and the
 # two-stage pulse protocol runner (g) built on top of that setup. All of
 # (a)-(g) are live code below, not pseudocode.
+#
+# `:FL_1step_Bspline` (the resonant single-stage B-spline drive variant,
+# DESIGN.md Part 14) used to live further down in this same file (Parts
+# 15-16) — since moved out to its own `Bspline_Fock_problem.jl`/
+# `Bspline_Fock_execution.jl` pair (DESIGN.md Part 19), once it became clear
+# the two protocols don't share a "ladder" structure at all (the B-spline
+# drive targets a Fock number directly, no rung-by-rung reiteration) and
+# duplicating a couple of physical constants into a fully standalone file
+# was preferable to an inter-problem `include` dependency between two
+# nominally-independent protocols.
+#
+# This file follows the project's standing three-way rule (DESIGN.md Part
+# 18, restated in CLAUDE.md's Scope note): NNQuantum.jl holds the fully
+# generic ML/dataset-management engine (training/testing/prediction, plus
+# dataset/basis/NN persistence) and must never reference this problem by
+# name; THIS file holds the quantum problem's own definition (physical
+# setup, raw dynamics/protocol runners — (a)-(g)) *and* its own dataset
+# input/output creation (FL_1step_3p_NN_outputs/_inputs) plus any other
+# NN-facing glue that is genuinely problem-specific
+# (predict_drive_parameters) — none of that belongs in NNQuantum.jl, and
+# none of it belongs in FockLadder_execution.jl either, which stays a thin
+# orchestrator that only calls into this file and NNQuantum.jl.
 
 include("Definition.jl")   # h, hbar, kb — needed below for Teq/nthm
 
@@ -71,10 +93,11 @@ N_mech = 5;
 # ωm, per (d) below — Qubit gets Δ0 = ωq - ωm (not the bare ωq), the mechanical
 # oscillator gets 0.0 (not the bare ωm).
 using QuantumDynamics
-using QuantumOptics   # expect — needed directly by (h) below
-using JLD2            # jldsave — needed by (h)'s save_dataset
+using QuantumOptics   # expect — needed by (h) below (dataset input/output creation)
 
-include("NNQuantum.jl")   # qo_infidelity, rand_hermitian_orthonormal_basis, threeD_parameter_space — needed by (h) below
+include("NNQuantum.jl")   # qo_infidelity, rand_hermitian_orthonormal_basis, threeD_parameter_space,
+                            # weighted_sample, uniform_parameter_sample, train_NN, predict_and_score —
+                            # this file's own dataset-creation/prediction-glue functions (h) need these
 
 qubit = Qubit(:qubit, Δ0)
 osc   = HarmonicOscillator(:osc, 0.0; nmax=N_mech)
@@ -193,19 +216,20 @@ end
 # --- Densely-sampled two-stage trajectory (for plotting) -----------------------
 #
 # FLstep_dynamics_3p's own (tspan, states) is only 3 points — each stage's
-# evolve call above is passed a bare 2-point tspan, correct for what (h)/
-# run_Fock_ladder actually need (endpoints only), but far too coarse to plot
-# a curve against. Promoted here (unchanged) from test.jl's own
-# run_short_dynamics, a test-local helper that mirrored FLstep_dynamics_3p's
-# construction line-for-line just to get plottable resolution — needed as
-# reusable, non-test-local code once approaching step 2's (v) staged
-# validation raised a real need to plot a *predicted* ladder-step trajectory,
-# not just the fixed smoke-test one test.jl itself already covers.
+# evolve call above is passed a bare 2-point tspan, correct for what
+# FockLadder_execution.jl's dataset generation actually needs (endpoints
+# only), but far too coarse to plot a curve against. Promoted here (unchanged)
+# from test.jl's own run_short_dynamics, a test-local helper that mirrored
+# FLstep_dynamics_3p's construction line-for-line just to get plottable
+# resolution — needed as reusable, non-test-local code once approaching step
+# 2's (v) staged validation raised a real need to plot a *predicted*
+# ladder-step trajectory, not just the fixed smoke-test one test.jl itself
+# already covers.
 #
 # Kept as its own function rather than adding an `npoints` keyword to
 # FLstep_dynamics_3p itself: the two functions serve different callers with
-# different needs (h)/run_Fock_ladder want the fast, 3-point endpoints-only
-# path on every dataset sample; a validation/plotting call wants the slower,
+# different needs — dataset generation wants the fast, 3-point endpoints-only
+# path on every sample; a validation/plotting call wants the slower,
 # densely-sampled one, occasionally. Same H0/J/π_pulse_shape, same two-stage
 # spin-flip-then-SWAP hand-off as FLstep_dynamics_3p — only each stage's
 # tspan differs (range(...; length=npoints) instead of a bare (t_start,
@@ -243,30 +267,19 @@ end
 
 # --- (h) Dataset generation (NN inputs/outputs) -------------------------------
 #
-# NOT part of the (a)-(g) system setup above. Step 3 of NNQuantum's plan
-# ("translate old_version's ML engine, kept as general as possible") hasn't
-# formally started (see CLAUDE.md) — this is a narrow, explicitly-requested
-# port of just the two dataset-generation functions old_version defines for
-# :FL_1step_3p (FL_1step_3p_NN_outputs / FL_1step_3p_NN_inputs, in
-# old_version/HBAR-qubit_problem/HBAR-qubit_problem.jl:325-358), kept under
+# Per this project's standing rule (DESIGN.md Part 18): dataset input/output
+# *creation* — sampling pulse parameters, then running them through this
+# problem's own dynamics function to build NN feature rows — is
+# problem-specific and lives here, not in NNQuantum.jl (fully generic) or
+# FockLadder_execution.jl (thin orchestrator only). Direct port of
+# old_version's FL_1step_3p_NN_outputs/FL_1step_3p_NN_inputs
+# (old_version/HBAR-qubit_problem/HBAR-qubit_problem.jl:325-358), kept under
 # the same names for direct correspondence.
 #
-# The generic helpers those two depend on (qo_infidelity,
-# rand_hermitian_orthonormal_basis, threeD_parameter_space) now live in
-# NNQuantum.jl (included above) — DESIGN.md Part 6 (i): they were
-# provisionally colocated here until that library file existed; it now
-# does, so they moved out. weighted_sample below is the one exception,
-# per NNQuantum.jl's own header note.
-#
-# weighted_sample replaces old_version's `sample(space, Weights(prob), n)`
-# (StatsBase) with a small hand-rolled cumulative-weight sampler, to avoid
-# pulling in a new dependency for one weighted-sampling call.
-function weighted_sample(items, weights, n)
-    cumw = cumsum(weights)
-    total = cumw[end]
-    total > 0 || throw(ArgumentError("weighted_sample: all weights are zero"))
-    return [items[searchsortedfirst(cumw, rand() * total)] for _ in 1:n]
-end
+# The generic helpers these two depend on (qo_infidelity,
+# rand_hermitian_orthonormal_basis, threeD_parameter_space,
+# uniform_parameter_sample, weighted_sample) all live in NNQuantum.jl,
+# included above.
 
 # Direct port of old_version's FL_1step_3p_NN_outputs
 # (HBAR-qubit_problem.jl:325-329): weighted-samples n_samples
@@ -303,15 +316,14 @@ end
 # (state_target_spinflip, state_target_1step, decom_basis, phonon_n,
 # correction) down to the three fields this variant actually needs —
 # phonon_n/correction were old_version's detuning-correction knobs, dropped
-# per (a). Whether/how these get bundled back into a struct is left to
-# step 3 ("kept as general as possible" — an open question, see CLAUDE.md).
+# per (a). Whether/how these get bundled back into a struct is left open
+# (CLAUDE.md).
 #
 # FLstep_dynamics_3p's own (tspan, states) return already samples exactly
 # the 3 points needed here — states[1] the initial state, states[2] the
 # spin-flip-stage endpoint, states[end] the full-protocol endpoint —
 # because each stage's evolve call underneath is passed a bare 2-point
-# tspan (see (g)'s status note in DESIGN.md). So this needs no change to
-# FLstep_dynamics_3p itself.
+# tspan. So this needs no change to FLstep_dynamics_3p itself.
 function FL_1step_3p_NN_inputs(t0, initial_state, target_spinflip, target_final, decom_basis, pulse_parameters, n_samples)
     inputs = Vector{Vector{Float64}}(undef, n_samples)
     final_states = Vector{Any}(undef, n_samples)
@@ -331,116 +343,21 @@ function FL_1step_3p_NN_inputs(t0, initial_state, target_spinflip, target_final,
     return [vcat(inputs[i], infidelity_spin_flip[i], swap_infidelity[i]) for i in 1:n_samples]
 end
 
-# --- Dataset persistence (JLD2) -----------------------------------------------
+# --- (i) NN-facing glue: predict_drive_parameters ------------------------------
 #
-# Still (h), not step 3 proper (see this section's own opening note above).
-# Saves the dataset FL_1step_3p_NN_outputs/FL_1step_3p_NN_inputs produce to a
-# .jld2 file, one row per sample: vcat(inputs[i], outputs[i]) — the NN input
-# features (decom_basis expectations + 2 infidelities) followed by the
-# (τ_exc, ωd, τ_SWAP) pulse-parameter triple that produced them. Same row
-# layout as old_version's dataset_creation (ML_QM_library.jl:232-253, input
-# columns then output columns), but as a standalone function here rather
-# than dataset_creation's own role folded into old_version's larger
-# dataset_generation orchestrator — no such orchestrator exists in
-# NNQuantum yet (step 3, unstarted).
-#
-# jldsave with separate top-level keys plus a format_version, not one
-# serialized blob, follows QuantumDynamics/framework's own io.jl convention
-# (see save_result there) — a schema change later can then fall back on a
-# missing key instead of depending on JLD2 correctly reconstructing an
-# evolved struct shape.
-const DATASET_FORMAT_VERSION = 1
-
-function dataset_rows(inputs, outputs)
-    length(inputs) == length(outputs) || throw(ArgumentError(
-        "dataset_rows: inputs and outputs have different lengths ($(length(inputs)) vs $(length(outputs)))"))
-    return [Float64.(vcat(inputs[i], collect(outputs[i]))) for i in eachindex(inputs)]
-end
-
-"""
-    save_dataset(path, inputs, outputs; description="", params=Dict{Symbol,Any}())
-
-Save an FL_1step_3p dataset to `path` (a `.jld2` file). `inputs`/`outputs`
-are `FL_1step_3p_NN_inputs`/`FL_1step_3p_NN_outputs`'s own return values —
-same length, row `i` of the saved `dataset` matrix is
-`vcat(inputs[i], outputs[i])`. `dim_input`/`dim_output` are saved alongside
-so a later `dataset[:, 1:dim_input]`/`dataset[:, dim_input+1:end]` split
-doesn't need `inputs`/`outputs` themselves still in memory.
-"""
-function save_dataset(path::AbstractString, inputs, outputs;
-                       description::AbstractString="", params::Dict{Symbol,Any}=Dict{Symbol,Any}())
-    rows = dataset_rows(inputs, outputs)
-    jldsave(path;
-        format_version=DATASET_FORMAT_VERSION,
-        dataset=permutedims(reduce(hcat, rows)),
-        dim_input=length(inputs[1]),
-        dim_output=length(outputs[1]),
-        description=description,
-        params=params,
-    )
-    nothing
-end
-
-# --- (iv) NN wrappers: train_NN / predict_drive_parameters --------------------
-#
-# DESIGN.md Part 6 (iv): closes run_Fock_ladder's steps 2-3 stubs
-# (FockLadder_execution.jl). These two functions are deliberately thin —
-# everything problem-agnostic (dataset splitting, normalization, model
-# architecture, the training/testing loop, the predict-then-resimulate-
-# then-score orchestration) lives in NNQuantum.jl (i)/(ii)/(iv) and is
-# called from here, not reimplemented. train_NN/predict_drive_parameters
-# are the only two places in this file that connect the two: everything
-# NNQuantum.jl itself touches is a plain matrix, vector, model, or a
-# `simulate` function value — it never sees a pulse parameter, a
-# decom_basis, or FLstep_dynamics_3p by name. That boundary is what makes
-# NNQuantum.jl's machinery reusable as-is for a different quantum problem,
-# or a different drive parameterization (e.g. :FL_1step_2drives's BSpline
-# coefficients, were it ever ported) — swapping in a new problem only ever
-# means writing a new pair of thin wrappers like these, never touching
-# NNQuantum.jl.
-#
-# train_NN converts FL_1step_3p_NN_outputs/_inputs's own return shapes —
-# inputs a Vector{Vector{Float64}} (one feature row per sample, from
-# FL_1step_3p_NN_inputs), outputs a Vector{NTuple{3,Float64}} (one
-# (τ_exc,ωd,τ_SWAP) sample per row, from weighted_sample drawing straight
-# out of threeD_parameter_space's tuple grid, not vectors) — into the
-# plain Float64 matrices NNQuantum.jl's train_and_test_NN expects (hence
-# `collect.(outputs)` below, turning each tuple into a vector `reduce(hcat,
-# ...)` can stack), then delegates to the matrix method below.
-#
-# A second method, taking X/Y as plain matrices directly, was added
-# alongside run_Fock_ladder's dataset_mode option (DESIGN.md): a dataset
-# loaded from disk via NNQuantum.jl's load_dataset already comes back as
-# plain Float64 matrices, not FL_1step_3p_NN_outputs/_inputs's own
-# vector-of-vector/vector-of-tuple shapes — this lets run_Fock_ladder call
-# `train_NN` the same way regardless of whether the dataset was just
-# generated or loaded from a previous run's saved file, via ordinary Julia
-# multiple dispatch rather than a runtime branch inside one method.
-# train_fraction=0.9375 matches Chu_DFL_execution.ipynb's own
-# :FL_1step_3p/:master_dynamic cell (n_training=750 of n_samples=800);
-# clamped to leave at least one sample on each side of the split so a small
-# smoke-test n_samples doesn't produce an empty train or test set.
-function train_NN(X::AbstractMatrix, Y::AbstractMatrix; train_fraction::Real=0.9375, kwargs...)
-    n_training = clamp(round(Int, train_fraction * size(X, 1)), 1, size(X, 1) - 1)
-    return train_and_test_NN(X, Y, n_training; kwargs...)
-end
-
-function train_NN(inputs::AbstractVector, outputs::AbstractVector; kwargs...)
-    X = permutedims(reduce(hcat, inputs))
-    Y = permutedims(reduce(hcat, collect.(outputs)))
-    return train_NN(X, Y; kwargs...)
-end
-
-# predict_drive_parameters builds the one problem-specific piece
-# NNQuantum.jl's predict_and_score needs but can't supply itself: the
-# target state's own input-feature vector (decom_basis expectation values,
-# concatenated with [0,0] for the two infidelities a state has with
-# itself — matches Chu_DFL_execution.ipynb's target_input_1step exactly,
-# and the row layout FL_1step_3p_NN_inputs builds for every other sample),
-# and a `simulate` closure over FLstep_dynamics_3p/t0/initial_state that
-# turns a predicted (τ_exc,ωd,τ_SWAP) into the state it actually reaches.
-# `nn` is train_NN's own return value (a NamedTuple: model + the four
-# normalization stats) — passed straight through, not re-derived.
+# train_NN itself is fully generic (NNQuantum.jl, no problem-specific
+# content) so no wrapper for it lives here. predict_drive_parameters is
+# genuinely problem-specific glue, per the same Part 18 rule as (h) above: it
+# builds the one input NNQuantum.jl's predict_and_score needs but can't
+# supply itself — the target state's own input-feature vector (decom_basis
+# expectation values, concatenated with [0,0] for the two infidelities a
+# state has with itself — matches Chu_DFL_execution.ipynb's
+# target_input_1step exactly, and the row layout FL_1step_3p_NN_inputs
+# builds for every other sample) — and a `simulate` closure over
+# FLstep_dynamics_3p/t0/initial_state that turns a predicted
+# (τ_exc,ωd,τ_SWAP) into the state it actually reaches. `nn` is train_NN's
+# own return value (a NamedTuple: model + the four normalization stats) —
+# passed straight through, not re-derived.
 function predict_drive_parameters(nn, t0, initial_state, target_final, decom_basis)
     x_target = vcat([real(expect(matrix, target_final)) for matrix in decom_basis], 0.0, 0.0)
 
